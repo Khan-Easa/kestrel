@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Virtualenvs / package managers
+.venv/
+venv/
+env/
+
+# Testing / coverage / type-checker caches
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Kestrel-specific
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Personal study notes — not part of the project
+LEARNING_NOTES.md
+
+# Claude Code local state
+.claude/
