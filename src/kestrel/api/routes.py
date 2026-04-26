@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
 from kestrel.execution.manager import run_code
+from kestrel.api.auth import require_api_key
 
 router = APIRouter()
 
@@ -14,7 +15,11 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.post("/execute", response_model=ExecuteResponse)
+@router.post(
+    "/execute",
+    response_model=ExecuteResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def execute(
     req: ExecuteRequest,
     settings: Settings = Depends(get_settings),
