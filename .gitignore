@@ -40,6 +40,7 @@ Thumbs.db
 
 # Personal study notes — not part of the project
 LEARNING_NOTES.md
+CLAUDE.md
 
 # Claude Code local state
 .claude/
