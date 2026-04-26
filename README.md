@@ -1,31 +1,32 @@
 # Kestrel
 
-Self-hosted, sandboxed Python code execution service.
+Self-hosted Python code execution service. Send code over HTTP, get back captured output.
 
-**Status:** Phase 1 (Foundation) — `/health` and `/execute` endpoints backed by a throwaway subprocess runner. Docker-based isolation lands in Phase 2.
+**Status:** Phase 1 of 7 — single-node service with a subprocess executor. Docker-based isolation lands in Phase 2 (see `ROADMAP.md`).
 
 ## Requirements
 
 - Python 3.11
 - [uv](https://docs.astral.sh/uv/) for dependency management
 
-## Quick start
+## Quickstart
 
 ```bash
-# 1. Install dependencies
+# Install dependencies (creates .venv, installs runtime + dev extras)
 uv sync --extra dev
 
-# 2. Set the dev API key (Phase 1 uses a single static bearer token)
-export KESTREL_DEV_API_KEY="dev-secret-change-me"
+# Run the server (auth disabled by default — see Authentication below)
+uv run uvicorn kestrel.app:create_app --factory --reload --port 8000
+```
 
-# 3. Run the server
-uv run uvicorn kestrel.main:app --reload --port 8000
+In another shell:
 
-# 4. In another shell, hit the endpoints
+```bash
+# Liveness check
 curl http://localhost:8000/health
 
+# Execute some code
 curl -X POST http://localhost:8000/execute \
-  -H "Authorization: Bearer $KESTREL_DEV_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"code": "print(2 + 2)"}'
 ```
@@ -39,27 +40,73 @@ Expected response:
   "exit_code": 0,
   "duration_ms": 42,
   "timed_out": false,
-  "output_truncated": false
+  "stdout_truncated": false,
+  "stderr_truncated": false
 }
 ```
 
-## Running tests
+The server also publishes interactive API docs at `http://localhost:8000/docs` (Swagger UI) and `/redoc`.
+
+## Endpoints
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/health` | open | Liveness probe. Returns `{"status": "ok"}`. |
+| `POST` | `/execute` | bearer (if configured) | Run Python code in a subprocess. |
+
+Every response carries an `X-Request-ID` header. If the client supplies one in the request, it is echoed back; otherwise a fresh UUID is generated. Useful for correlating client logs with server logs.
+
+## Configuration
+
+All settings come from environment variables prefixed `KESTREL_`. Defaults are defined in `src/kestrel/config.py`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `KESTREL_DEV_API_KEY` | `""` | Bearer token required by `/execute`. Empty value disables auth. |
+| `KESTREL_EXECUTE_TIMEOUT_SECONDS` | `5.0` | Maximum subprocess wall time before SIGKILL. |
+| `KESTREL_EXECUTE_OUTPUT_CAP_BYTES` | `1048576` | Per-stream truncation cap (stdout and stderr each). |
+| `KESTREL_LOG_LEVEL` | `INFO` | Root log level. |
+| `KESTREL_LOG_JSON` | `False` | `True` for one-line JSON logs; `False` for colored console output. |
+
+## Authentication
+
+`/execute` is gated by a bearer token. The default `KESTREL_DEV_API_KEY=""` disables the gate entirely — useful for local development. To enable auth, set the variable and restart the server:
 
 ```bash
-uv run pytest
+KESTREL_DEV_API_KEY="some-long-secret" uv run uvicorn kestrel.app:create_app --factory --port 8000
+```
+
+Clients then send the token as `Authorization: Bearer some-long-secret`. Missing or wrong tokens get `HTTP 401`. `/health` is unauthenticated regardless.
+
+## Tests
+
+```bash
+uv run pytest -v          # full suite (~1s)
+uv run pytest -v -s       # show structured log lines
+uv run pytest -k auth     # run a subset by name
 ```
 
 ## Project layout
 
-See `DESIGN.md` for the full module map. Phase 1 populates:
+```
+src/kestrel/
+├── config.py              Settings + get_settings (lru_cache singleton)
+├── app.py                 create_app factory: logging + middleware + routes
+├── logging.py             configure_logging (structlog + stdlib bridge)
+├── api/
+│   ├── auth.py            require_api_key dependency
+│   ├── routes.py          GET /health, POST /execute
+│   └── schemas.py         ExecuteRequest, ExecuteResponse
+└── execution/
+    └── manager.py         run_code (asyncio subprocess + timeout + output cap)
 
-- `src/kestrel/main.py` — FastAPI entrypoint
-- `src/kestrel/api/` — routes + schemas
-- `src/kestrel/execution/manager.py` — throwaway subprocess runner (replaced in Phase 2)
-- `src/kestrel/config.py` — pydantic-settings
-- `src/kestrel/auth.py` — bearer-token dependency
-- `src/kestrel/observability/logging.py` — structlog setup
+tests/integration/test_execute.py    10 tests covering all behaviors
+```
 
-## Scope
+## Roadmap
 
-Phase 1 is intentionally minimal. No Docker, no resource limits, no sessions, no persistence, no rate limiting. Do not pull those forward — see `ROADMAP.md`.
+Phase 1 (this) is intentionally minimal: no container isolation, no resource limits, no sessions, no persistence. See `ROADMAP.md` for the full 7-phase plan.
+
+## License
+
+MIT — see `LICENSE`.
