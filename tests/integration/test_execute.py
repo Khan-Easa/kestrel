@@ -92,3 +92,16 @@ def test_execute_rejects_wrong_api_key(client: TestClient, override_settings) ->
     )
 
     assert response.status_code == 401
+
+def test_response_carries_request_id_header(client: TestClient) -> None:
+    response = client.get("/health")
+    assert response.status_code == 200
+    request_id = response.headers.get("x-request-id")
+    assert request_id is not None
+    assert len(request_id) > 0
+
+
+def test_response_echoes_supplied_request_id(client: TestClient) -> None:
+    supplied = "test-request-id-123"
+    response = client.get("/health", headers={"X-Request-ID": supplied})
+    assert response.headers["x-request-id"] == supplied

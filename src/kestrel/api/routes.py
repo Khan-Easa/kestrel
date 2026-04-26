@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends
 
+from kestrel.api.auth import require_api_key
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
 from kestrel.execution.manager import run_code
-from kestrel.api.auth import require_api_key
+
+logger = structlog.get_logger()
 
 router = APIRouter()
+
 
 @router.get("/health")
 async def health() -> dict[str, str]:
@@ -25,4 +29,14 @@ async def execute(
     settings: Settings = Depends(get_settings),
 ) -> ExecuteResponse:
     """Run user-supplied Python code in a subprocess; return captured output."""
-    return await run_code(req.code, settings)
+    result = await run_code(req.code, settings)
+    logger.info(
+        "execute_completed",
+        code_length=len(req.code),
+        duration_ms=result.duration_ms,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        stdout_truncated=result.stdout_truncated,
+        stderr_truncated=result.stderr_truncated,
+    )
+    return result
