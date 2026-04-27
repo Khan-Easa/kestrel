@@ -66,7 +66,7 @@ Plus supporting directories that still need creating when their respective steps
 
 ## Open items / blockers
 
-- **Docker in WSL:** `docker` CLI is not on PATH in this shell. Irrelevant for Phase 1 (no Docker yet), must be fixed before Phase 2. Memory note exists.
+- **Docker in WSL:** cleared 2026-04-27 — `docker --version` returns 29.4.1 and `docker run --rm hello-world` succeeds in this shell. Phase 2 prerequisite met.
 - **Git init:** user declined for now. `.pre-commit-config.yaml` not yet written (will add when ready to init git).
 - **Ruff style cleanup:** the user's hand-typed code has consistent PEP 8 spacing nits (spaces around `=` in keyword args, single blank line where two are expected, etc.). All harmless; `ruff --fix` will normalize when we wire it up.
 - **Editable install gotcha:** documented above. If new files appear under `src/kestrel/` and import fails despite a successful `uv sync`, run `uv sync --reinstall-package kestrel`.
