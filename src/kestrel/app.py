@@ -1,12 +1,14 @@
 from __future__ import annotations
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
 
 from kestrel.api.routes import router
 from kestrel.config import get_settings
+from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.logging import configure_logging
 
 logger = structlog.get_logger()
@@ -15,7 +17,13 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings)
 
-    app = FastAPI(title="Kestrel")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if settings.executor_backend == "docker":
+            await sweep_orphan_containers()
+        yield
+
+    app = FastAPI(title="Kestrel", lifespan=lifespan)
     app.include_router(router)
 
     @app.middleware("http")

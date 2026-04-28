@@ -1,15 +1,46 @@
+import shutil
+import subprocess
+from collections.abc import Callable
+from functools import lru_cache
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
-from collections.abc import Callable
-from typing import Any
 
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
+from kestrel.execution import get_executor
+from kestrel.execution.docker_executor import DockerExecutor
 
-@pytest.fixture
-def client() -> TestClient:
+
+@lru_cache(maxsize=1)
+def _docker_reachable() -> bool:
+    """Quick check that the Docker CLI exists and the daemon responds."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+@pytest.fixture(params=["subprocess", "docker"])
+def client(request: pytest.FixtureRequest) -> TestClient:
+    backend = request.param
+    if backend == "docker" and not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
     app = create_app()
+    if backend == "docker":
+        app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     return TestClient(app)
+
 
 @pytest.fixture
 def override_settings(client: TestClient) -> Callable[..., None]:

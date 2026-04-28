@@ -31,7 +31,7 @@ def test_execute_validation_rejects_empty_code(client: TestClient) -> None:
 
 
 def test_execute_timeout(client: TestClient, override_settings) -> None:
-    override_settings(execute_timeout_seconds=0.5)
+    override_settings(execute_timeout_seconds=2.0)
 
     response = client.post("/execute", json={"code": "while True: pass"})
 
@@ -39,7 +39,7 @@ def test_execute_timeout(client: TestClient, override_settings) -> None:
     body = response.json()
     assert body["timed_out"] is True
     assert body["exit_code"] == -1
-    assert body["duration_ms"] >= 500
+    assert body["duration_ms"] >= 2000
 
 
 def test_execute_truncates_stdout(client: TestClient, override_settings) -> None:
