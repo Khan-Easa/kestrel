@@ -1,8 +1,5 @@
-# import pytest
 from fastapi.testclient import TestClient
 
-from kestrel.config import Settings
-from kestrel.execution.manager import run_code
 
 def test_health_endpoint(client: TestClient) -> None:
     response = client.get("/health")
@@ -23,6 +20,7 @@ def test_execute_success(client: TestClient) -> None:
     assert body["stdout_truncated"] is False
     assert body["stderr_truncated"] is False
 
+
 def test_execute_validation_rejects_empty_code(client: TestClient) -> None:
     response = client.post("/execute", json={"code": ""})
 
@@ -30,6 +28,7 @@ def test_execute_validation_rejects_empty_code(client: TestClient) -> None:
     detail = response.json()["detail"]
     # Pydantic's error structure: a list of dicts with "loc" tuples pointing to the bad field.
     assert any("code" in error["loc"] for error in detail)
+
 
 def test_execute_timeout(client: TestClient, override_settings) -> None:
     override_settings(execute_timeout_seconds=0.5)
@@ -43,21 +42,18 @@ def test_execute_timeout(client: TestClient, override_settings) -> None:
     assert body["duration_ms"] >= 500
 
 
-async def test_run_code_truncates_stdout() -> None:
-    settings = Settings(
-        dev_api_key="",
-        execute_timeout_seconds=5.0,
-        execute_output_cap_bytes=1024,
-        log_level="INFO",
-        log_json=False,
-    )
+def test_execute_truncates_stdout(client: TestClient, override_settings) -> None:
+    override_settings(execute_output_cap_bytes=1024)
 
-    result = await run_code('print("x" * 100_000)', settings)
+    response = client.post("/execute", json={"code": 'print("x" * 100_000)'})
 
-    assert len(result.stdout.encode("utf-8")) == 1024
-    assert result.stdout_truncated is True
-    assert result.exit_code == 0
-    assert result.timed_out is False
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["stdout"].encode("utf-8")) == 1024
+    assert body["stdout_truncated"] is True
+    assert body["exit_code"] == 0
+    assert body["timed_out"] is False
+
 
 def test_execute_requires_api_key_when_set(client: TestClient, override_settings) -> None:
     override_settings(dev_api_key="secret123")
@@ -92,6 +88,7 @@ def test_execute_rejects_wrong_api_key(client: TestClient, override_settings) ->
     )
 
     assert response.status_code == 401
+
 
 def test_response_carries_request_id_header(client: TestClient) -> None:
     response = client.get("/health")

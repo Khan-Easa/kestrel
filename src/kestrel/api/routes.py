@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from kestrel.api.auth import require_api_key
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
-from kestrel.execution.manager import run_code
+from kestrel.execution import Executor, get_executor
 
 logger = structlog.get_logger()
 
@@ -27,9 +27,10 @@ async def health() -> dict[str, str]:
 async def execute(
     req: ExecuteRequest,
     settings: Settings = Depends(get_settings),
+    executor: Executor = Depends(get_executor),
 ) -> ExecuteResponse:
-    """Run user-supplied Python code in a subprocess; return captured output."""
-    result = await run_code(req.code, settings)
+    """Run user-supplied Python code via the configured executor; return captured output."""
+    result = await executor.run(req.code, settings)
     logger.info(
         "execute_completed",
         code_length=len(req.code),
