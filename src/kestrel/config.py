@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     execute_output_cap_bytes: int = Field(default=64* 1024, gt= 0, description="Maximum bytes captured per output stream before truncation.")
     log_level: str= Field(default="INFO", description= "Logging verbosity. One of DEBUG, INFO, WARNING, ERROR, CRITICAL.")
     log_json: bool= Field(default=False, description= "If True, emit logs as JSON (production); else pretty console output (dev).")
-    executor_backend: Literal["subprocess", "docker"] = Field(default="subprocess", description="Which executor implementation to use. 'subprocess' = Phase 1 local subprocess; 'docker' = Phase 2 sandboxed container.")
+    executor_backend: Literal["subprocess", "docker"] = Field(default="docker", description="Which executor implementation to use. 'subprocess' = Phase 1 local subprocess (fallback for hosts without Docker); 'docker' = Phase 2 sandboxed container (default since Phase 2).")
     executor_docker_image: str = Field(default="kestrel-runtime:0.2.0", description="Image tag the docker backend launches per request. Ignored when executor_backend != 'docker'.")
 
 @lru_cache(maxsize=1)

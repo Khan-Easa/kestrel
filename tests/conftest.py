@@ -11,6 +11,7 @@ from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
 from kestrel.execution.docker_executor import DockerExecutor
+from kestrel.execution.manager import SubprocessExecutor
 
 
 @lru_cache(maxsize=1)
@@ -37,8 +38,21 @@ def client(request: pytest.FixtureRequest) -> TestClient:
         pytest.skip("docker daemon unreachable")
 
     app = create_app()
-    if backend == "docker":
+    if backend == "subprocess":
+        app.dependency_overrides[get_executor] = lambda: SubprocessExecutor()
+    else:
         app.dependency_overrides[get_executor] = lambda: DockerExecutor()
+    return TestClient(app)
+
+
+@pytest.fixture
+def docker_client() -> TestClient:
+    """Always-Docker variant for isolation-specific tests."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    app = create_app()
+    app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     return TestClient(app)
 
 
