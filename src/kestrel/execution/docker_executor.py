@@ -46,6 +46,8 @@ class DockerExecutor:
                 "--memory-swap", "256m",
                 "--cpus", "1.0",
                 "--pids-limit", "64",
+                "--security-opt", "no-new-privileges",
+                "--cap-drop", "ALL",
                 "--volume", f"{host_path}:/sandbox/main.py:ro",
                 "--workdir", "/sandbox",
                 self._image_tag,
