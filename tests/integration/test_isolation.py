@@ -72,3 +72,28 @@ def test_isolation_capabilities_dropped(docker_client: TestClient) -> None:
     assert body["exit_code"] == 0
     cap_eff_hex = body["stdout"].strip().split()[1]
     assert int(cap_eff_hex, 16) == 0, f"expected zero effective capabilities, got {cap_eff_hex}"
+
+def test_isolation_pids_limit_enforced(docker_client: TestClient) -> None:
+    code = (
+        "import os\n"
+        "import time\n"
+        "children = 0\n"
+        "for _ in range(200):\n"
+        "    try:\n"
+        "        pid = os.fork()\n"
+        "    except OSError:\n"
+        "        break\n"
+        "    if pid == 0:\n"
+        "        time.sleep(60)\n"
+        "        os._exit(0)\n"
+        "    children += 1\n"
+        "print(f'FORKED {children}')\n"
+    )
+    response = docker_client.post("/execute", json={"code": code})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is False
+    assert body["exit_code"] == 0
+    forked = int(body["stdout"].strip().split()[1])
+    assert 0 < forked < 200, f"expected pids cap to fire before 200 forks, got {forked}"
+    assert forked <= 64, f"pids cap should be ~64, got {forked} (cap may have been loosened)"
