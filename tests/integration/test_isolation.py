@@ -97,3 +97,43 @@ def test_isolation_pids_limit_enforced(docker_client: TestClient) -> None:
     forked = int(body["stdout"].strip().split()[1])
     assert 0 < forked < 200, f"expected pids cap to fire before 200 forks, got {forked}"
     assert forked <= 64, f"pids cap should be ~64, got {forked} (cap may have been loosened)"
+
+def test_isolation_seccomp_filter_active(docker_client: TestClient) -> None:
+    code = (
+        "with open('/proc/self/status') as f:\n"
+        "    for line in f:\n"
+        "        if line.startswith('Seccomp:'):\n"
+        "            print(line.strip())\n"
+        "            break\n"
+    )
+    response = docker_client.post("/execute", json={"code": code})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 0
+    assert body["stdout"].strip() == "Seccomp:\t2"
+
+def test_isolation_tmpfs_size_capped(docker_client: TestClient) -> None:
+    code = (
+        "import os\n"
+        "fd = os.open('/tmp/big', os.O_WRONLY | os.O_CREAT)\n"
+        "chunk = b'x' * (1024 * 1024)\n"
+        "written = 0\n"
+        "blocked = None\n"
+        "try:\n"
+        "    for _ in range(128):\n"
+        "        written += os.write(fd, chunk)\n"
+        "except OSError as e:\n"
+        "    blocked = e.errno\n"
+        "finally:\n"
+        "    os.close(fd)\n"
+        "print(f'written={written} blocked={blocked}')\n"
+    )
+    response = docker_client.post("/execute", json={"code": code})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 0
+    output = body["stdout"].strip()
+    assert "blocked=28" in output, f"expected ENOSPC (errno 28), got: {output}"
+    written_str = output.split()[0].split("=")[1]
+    written_mib = int(written_str) / (1024 * 1024)
+    assert 50 < written_mib <= 64, f"expected ~64 MiB written before cap, got {written_mib} MiB"
