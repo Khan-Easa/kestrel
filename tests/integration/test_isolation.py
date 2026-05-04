@@ -1,3 +1,5 @@
+import pytest
+
 from fastapi.testclient import TestClient
 
 
@@ -137,3 +139,32 @@ def test_isolation_tmpfs_size_capped(docker_client: TestClient) -> None:
     written_str = output.split()[0].split("=")[1]
     written_mib = int(written_str) / (1024 * 1024)
     assert 50 < written_mib <= 64, f"expected ~64 MiB written before cap, got {written_mib} MiB"
+
+
+def _is_wsl2() -> bool:
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(
+    _is_wsl2(),
+    reason="WSL2 kernel does not enforce Docker --memory cgroup limits",
+)
+def test_isolation_memory_limit_enforced(docker_client: TestClient) -> None:
+    code = (
+        "chunks = []\n"
+        "for _ in range(512):\n"
+        "    chunks.append(bytearray(1024 * 1024))\n"
+        "print(f'ALLOCATED {len(chunks)} MiB')\n"
+    )
+    response = docker_client.post("/execute", json={"code": code})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is False, "OOM-kill should fire before the 5s timeout"
+    assert body["exit_code"] != 0, (
+        f"expected non-zero exit (OOM-killed), got {body['exit_code']} — "
+        f"memory cap not enforced? stdout={body['stdout']!r}"
+    )
