@@ -166,6 +166,40 @@ Phase 3 Step 5 considered including HTTP-layer rate limiting (per-client request
 
 ---
 
+## Phase 4 Decisions (Sessions)
+
+### Communication protocol: home-grown JSON-line over stdin/stdout
+
+Phase 4 introduces a long-running Python process inside each session container; the API needs a wire format to send code in and receive stdout/stderr/exit_code back. Chose a home-grown JSON-line protocol over the container's stdin/stdout, framed as "one JSON message per line." The container runs a small kernel script on startup that loops: read a JSON line from stdin, exec the code in a persistent global namespace, write a JSON-line response to stdout. The API holds onto the container's stdin/stdout pipes (`docker run -i ...`) for the session's lifetime and writes/reads JSON lines on demand.
+
+Two real alternatives were considered and rejected. The Jupyter messaging protocol (ZeroMQ across five sockets per kernel, HMAC-signed multipart messages, `ipykernel` as the runtime) would have been production-grade and would have given us Phase 6's rich-output story essentially for free, but at three costs that didn't fit Phase 4: (a) ZMQ wants TCP, and we'd have had to either weaken the Phase 2 `--network none` lock or design unix-socket bind-mounts into the container, both real work; (b) `ipykernel` brings IPython's auto-magic and cell-level introspection, behaviour we may not want; (c) ZMQ + HMAC + Jupyter-specific debugging is a learning-cliff for what Phase 4's stated theme (sessions) does not actually need. A hybrid (home-grown wire transport but Jupyter-shaped message field names) was also considered — rejected as adding discipline now for migration insurance against an option we may never exercise.
+
+The chosen design's tradeoffs are accepted explicitly: (1) Kestrel sessions will not be Jupyter-compatible — a Jupyter UI cannot attach to a Kestrel session; (2) we own every edge case ourselves (kernel crash mid-message, stdout that arrives long after the request "completes," partial output capture), but those are bounded problems we can solve incrementally. The win is that `--network none` survives Phase 4 untouched — pipes are file descriptors, not sockets, so there is no network-namespace concern at all.
+
+### Concurrency within a session: reject second concurrent execute with HTTP 409
+
+A session has one Python process behind it, which is single-threaded by nature. When two `POST /sessions/{id}/execute` calls arrive for the same session while one is still running, the server rejects the second with HTTP 409 Conflict and `{"error": "session_busy"}`. The caller decides whether to retry. The first request runs through normally; the rejection is immediate (no queueing, no waiting).
+
+Two alternatives were considered. **Serialize** (queue the second behind the first) was rejected because it builds an implicit unbounded per-session work queue, and HTTP semantics make "wait an arbitrary time for someone else's code to finish" awkward — wall-clock timeout starts when, request arrival or execution start? Either answer is wrong half the time. **Cancel-and-replace** (interrupt the running execution, start the new one) matches Jupyter's "interrupt and re-run cell" UX but is too aggressive as a default; cleanly interrupting arbitrary user code is genuinely hard (signal handling, partial-state cleanup), and surprising if the contention is accidental.
+
+Reject-with-409 won on three points: (1) every request gets a deterministic answer in bounded time; (2) 409 is the standard HTTP code for "resource in a conflicting state," well-understood by clients and proxies; (3) a normal REPL-shaped client only issues one execute at a time, so contention is a bug or a race, and 409 surfaces it loudly instead of absorbing it. Cancel-and-replace can be added later as an explicit `?force=true` opt-in if a use case appears — easier to add than to remove.
+
+### Auth scope: bearer token + session_id as capability (unguessable UUID4)
+
+`/sessions/*` endpoints are gated by the same bearer-token check as `/execute` (consistency with Phase 1's auth policy). Once a session exists, the session_id itself is treated as a capability: a UUID4 carries 122 bits of entropy and is unguessable in practice, and knowledge of the session_id *is* the right to access it. We do not track ownership explicitly in Phase 4 — there is exactly one bearer token (`KESTREL_DEV_API_KEY`), so multi-user differentiation has nowhere to come from at the auth layer.
+
+The defence-in-depth posture is intentional: an attacker needs *both* the bearer *and* a specific session_id to do anything to a session. A bearer leak alone gives no session access (the attacker still doesn't know which session_ids exist); a session_id leak alone gives no API access (without the bearer, every endpoint returns 401). Same family of pattern as JupyterHub tokens, Google Docs share-links, AWS pre-signed URLs — unguessable identifiers used as capabilities.
+
+Explicit ownership tracking (Redis-stored `session_id → bearer_hash`; even with a valid bearer you can only access sessions you created) was considered and rejected for Phase 4: there is only one bearer in this phase, so ownership has nothing to differentiate. Phase 7 brings real per-key API keys, and ownership tracking will be added then on top of the existing capability semantics — no semantic break, no migration. The design composes cleanly forward.
+
+One operational discipline this commits us to: never log the full session_id at INFO level. Logs end up in aggregators, search indexes, and backups; the same reason we never log `req.code` applies here. Log a prefix for traceability (`session_id_prefix=abc12345`); the prefix is enough for ops correlation, not enough for an attacker to use as a capability.
+
+### Phase 2 lock formally amended: warm pool *is* allowed for session containers (not for per-request execution)
+
+The Phase 2 design lock "fresh container per request, no warm pool" is preserved for the original `/execute` endpoint and for any future stateless one-shot endpoints. Phase 4 introduces a separate, *session-scoped* container model where one container outlives many requests within one session, and `Kestrel_Project_Brief.pdf` §6.4 mandates a container pool ("Container pooling for efficiency") for warming session containers ahead of time. The two design locks address different concerns: Phase 2's lock was about *cross-request* state leakage (no state carries between independent users' executions); Phase 4's pool only serves sessions, and a session is by definition a single user's stateful conversation, so the cross-request-leakage concern does not apply within a pool. The contradiction is therefore shallow — surface-level wording, not substance — but it is worth noting explicitly so a future reader can see both decisions in context.
+
+---
+
 ## Going forward
 
 This file is autonomously maintained per the protocol locked in `feedback_decisions_md_protocol.md`:
