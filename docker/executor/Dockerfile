@@ -6,9 +6,13 @@ LABEL org.opencontainers.image.description="Kestrel sandboxed Python execution r
 LABEL org.opencontainers.image.licenses="MIT"
 
 RUN groupadd --system --gid 65534 sandbox 2>/dev/null || true \
-&& useradd  --system --uid 65534 --gid 65534 --no-create-home --shell /usr/sbin/nologin sandbox 2>/dev/null || true
+&& useradd --system --uid 65534 --gid 65534 \
+            --no-create-home --shell /usr/sbin/nologin \
+            sandbox 2>/dev/null || true
 
 WORKDIR /sandbox
 USER 65534:65534
 
-CMD ["python3", "-c", "print('kestrel runtime')"]
+COPY kernel.py /sandbox/kernel.py
+
+CMD ["python3", "/sandbox/kernel.py"]
