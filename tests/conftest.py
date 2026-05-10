@@ -12,7 +12,7 @@ from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
 from kestrel.execution.docker_executor import DockerExecutor
 from kestrel.execution.manager import SubprocessExecutor
-
+from kestrel.execution.session_runtime import SessionRuntime
 
 @lru_cache(maxsize=1)
 def _docker_reachable() -> bool:
@@ -71,3 +71,29 @@ def override_settings(client: TestClient) -> Callable[..., None]:
 
     yield _apply
     client.app.dependency_overrides.clear()
+
+@pytest.fixture
+async def session_runtime_factory():
+    """Yields an async factory ``_make(timeout_seconds=5.0)`` that starts
+    SessionRuntime instances. Every instance created during the test is
+    closed in teardown — close() is idempotent so explicit close() in
+    a test is fine.
+    """
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    started: list[SessionRuntime] = []
+
+    async def _make(timeout_seconds: float = 5.0) -> SessionRuntime:
+        runtime = await SessionRuntime.start(
+            image_tag="kestrel-runtime:0.3.0",
+            timeout_seconds=timeout_seconds,
+        )
+        started.append(runtime)
+        return runtime
+
+    try:
+        yield _make
+    finally:
+        for runtime in started:
+            await runtime.close()
