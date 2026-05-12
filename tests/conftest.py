@@ -139,3 +139,32 @@ async def session_registry_factory():
     finally:
         for registry in created:
             await registry.aclose()
+
+
+@pytest.fixture
+def session_http_client():
+    """TestClient with the FastAPI lifespan started, so app.state.registry is set."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    app = create_app()
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def session_http_client_authed():
+    """Like session_http_client but with dev_api_key set so /sessions/* requires bearer auth."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    app = create_app()
+    settings = Settings(
+        dev_api_key="test-secret-12345",
+        executor_backend="docker",
+        executor_docker_image="kestrel-runtime:0.3.0",
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with TestClient(app) as client:
+        yield client

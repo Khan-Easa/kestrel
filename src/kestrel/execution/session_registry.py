@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import structlog
@@ -16,6 +17,9 @@ _logger = structlog.get_logger()
 class SessionNotFound(KeyError):
     """Raised when a session_id is not present in the registry."""
 
+class SessionBusy(Exception):
+    """Raised when an execute is attempted on a session that's already running one."""
+
 
 @dataclass(frozen=True, slots=True)
 class SessionInfo:
@@ -28,10 +32,11 @@ class SessionInfo:
 
 @dataclass(slots=True)
 class _Entry:
-    """Private — pairs the public info with the live runtime handle."""
+    """Private — pairs the public info with the live runtime handle, plus a per-session execute lock."""
 
     info: SessionInfo
     runtime: SessionRuntime
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _utcnow() -> datetime:
@@ -97,6 +102,23 @@ class SessionRegistry:
         if entry is None:
             raise SessionNotFound(session_id)
         return entry.info
+    
+    @asynccontextmanager
+    async def acquire_for_execute(self, session_id: str):
+        """Acquire the per-session execute lock and yield the live runtime.
+
+        Bumps ``last_used`` (same as ``get_runtime``). Raises
+        ``SessionNotFound`` if unknown; raises ``SessionBusy`` immediately
+        if the lock is already held by another caller.
+        """
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            raise SessionNotFound(session_id)
+        if entry.lock.locked():
+            raise SessionBusy(session_id)
+        entry.info = replace(entry.info, last_used=_utcnow())
+        async with entry.lock:
+            yield entry.runtime
 
     def list(self) -> list[SessionInfo]:
         """Snapshot of every live session's metadata. Order is unspecified."""

@@ -5,10 +5,21 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from kestrel.api.routes import router
+from kestrel.api.sessions import router as sessions_router
 from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
+from kestrel.execution.session_registry import (
+    SessionBusy,
+    SessionNotFound,
+    SessionRegistry,
+)
+from kestrel.execution.session_runtime import (
+    SessionProtocolError,
+    SessionTerminated,
+)
 from kestrel.logging import configure_logging
 
 logger = structlog.get_logger()
@@ -21,10 +32,34 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         if settings.executor_backend == "docker":
             await sweep_orphan_containers()
-        yield
+        registry = SessionRegistry(settings)
+        await registry.start()
+        app.state.registry = registry
+        try:
+            yield
+        finally:
+            await registry.aclose()
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)
     app.include_router(router)
+    app.include_router(sessions_router)
+
+    @app.exception_handler(SessionNotFound)
+    async def _session_not_found(request: Request, exc: SessionNotFound) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": "session not found"})
+
+    @app.exception_handler(SessionBusy)
+    async def _session_busy(request: Request, exc: SessionBusy) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"error": "session_busy"})
+
+    @app.exception_handler(SessionTerminated)
+    async def _session_terminated(request: Request, exc: SessionTerminated) -> JSONResponse:
+        return JSONResponse(status_code=410, content={"detail": "session is no longer running"})
+
+    @app.exception_handler(SessionProtocolError)
+    async def _session_protocol(request: Request, exc: SessionProtocolError) -> JSONResponse:
+        logger.exception("session_protocol_error")
+        return JSONResponse(status_code=500, content={"detail": "internal protocol error"})
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
