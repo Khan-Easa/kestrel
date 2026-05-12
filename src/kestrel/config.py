@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     log_json: bool= Field(default=False, description= "If True, emit logs as JSON (production); else pretty console output (dev).")
     executor_backend: Literal["subprocess", "docker"] = Field(default="docker", description="Which executor implementation to use. 'subprocess' = Phase 1 local subprocess (fallback for hosts without Docker); 'docker' = Phase 2 sandboxed container (default since Phase 2).")
     executor_docker_image: str = Field(default="kestrel-runtime:0.3.0", description="Image tag the docker backend launches per request. Ignored when executor_backend != 'docker'.")
+    session_idle_timeout_seconds: float = Field(default=900.0, gt=0, description="Phase 4: max seconds a session may sit without an execute before the sweeper evicts it (15 min default).")
+    session_sweep_interval_seconds: float = Field(default=60.0, gt=0, description="Phase 4: how often the background sweeper wakes up to check for idle sessions.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

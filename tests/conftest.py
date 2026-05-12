@@ -13,6 +13,7 @@ from kestrel.execution import get_executor
 from kestrel.execution.docker_executor import DockerExecutor
 from kestrel.execution.manager import SubprocessExecutor
 from kestrel.execution.session_runtime import SessionRuntime
+from kestrel.execution.session_registry import SessionRegistry
 
 @lru_cache(maxsize=1)
 def _docker_reachable() -> bool:
@@ -97,3 +98,44 @@ async def session_runtime_factory():
     finally:
         for runtime in started:
             await runtime.close()
+
+
+@pytest.fixture
+async def session_registry_factory():
+    """Yields an async factory ``_make(**settings_overrides)`` that builds
+    SessionRegistry instances with reasonable test defaults. Every registry
+    created is aclose()'d in teardown — aclose is idempotent so tests may
+    call it explicitly too.
+
+    By default the background sweeper task is NOT started; tests drive
+    eviction by calling ``await registry._sweep_once(timeout_seconds=...)``
+    directly so no real timers are involved.
+    """
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    created: list[SessionRegistry] = []
+
+    async def _make(**overrides: Any) -> SessionRegistry:
+        defaults = {
+            "dev_api_key": "",
+            "execute_timeout_seconds": 5.0,
+            "execute_output_cap_bytes": 1_048_576,
+            "log_level": "INFO",
+            "log_json": False,
+            "executor_backend": "docker",
+            "executor_docker_image": "kestrel-runtime:0.3.0",
+            "session_idle_timeout_seconds": 900.0,
+            "session_sweep_interval_seconds": 60.0,
+        }
+        defaults.update(overrides)
+        settings = Settings(**defaults)
+        registry = SessionRegistry(settings=settings)
+        created.append(registry)
+        return registry
+
+    try:
+        yield _make
+    finally:
+        for registry in created:
+            await registry.aclose()
