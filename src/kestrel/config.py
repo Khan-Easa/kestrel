@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     executor_docker_image: str = Field(default="kestrel-runtime:0.3.0", description="Image tag the docker backend launches per request. Ignored when executor_backend != 'docker'.")
     session_idle_timeout_seconds: float = Field(default=900.0, gt=0, description="Phase 4: max seconds a session may sit without an execute before the sweeper evicts it (15 min default).")
     session_sweep_interval_seconds: float = Field(default=60.0, gt=0, description="Phase 4: how often the background sweeper wakes up to check for idle sessions.")
+    session_pool_size: int = Field(default=0, ge=0, description="Phase 4 substep 6: number of pre-started session containers kept warm in the pool. 0 = pool disabled, every POST /sessions cold-starts a new container. Opt-in via KESTREL_SESSION_POOL_SIZE.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

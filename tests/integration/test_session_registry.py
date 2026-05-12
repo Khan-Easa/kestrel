@@ -153,3 +153,101 @@ async def test_state_persists_across_get_runtime_calls(session_registry_factory)
     follow_up = await runtime_again.execute("print(x + 1)")
     assert follow_up.exit_code == 0
     assert follow_up.stdout.strip() == "42"
+
+async def _wait_for_pool_warm(registry) -> None:
+    """Helper — await every in-flight refill task to land."""
+    pending = list(registry._refill_tasks)
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def test_pool_warm_fills_on_start(session_registry_factory):
+    """With session_pool_size=2, start() schedules two background refills
+    that bring the pool to size 2."""
+    registry = await session_registry_factory(session_pool_size=2)
+    assert registry._pool == []
+
+    await registry.start()
+    await _wait_for_pool_warm(registry)
+
+    assert len(registry._pool) == 2
+
+
+async def test_create_pops_from_pool_and_schedules_refill(session_registry_factory):
+    """create() takes a runtime from the pool (no fresh docker spawn) and queues
+    a refill task that returns the pool to its target size."""
+    registry = await session_registry_factory(session_pool_size=2)
+    await registry.start()
+    await _wait_for_pool_warm(registry)
+    assert len(registry._pool) == 2
+
+    info = await registry.create()
+    assert info.session_id  # got a valid session
+    assert len(registry._pool) == 1  # one popped
+
+    await _wait_for_pool_warm(registry)
+    assert len(registry._pool) == 2  # refilled back to target
+
+
+async def test_create_falls_back_to_fresh_spawn_when_pool_disabled(session_registry_factory):
+    """The default session_pool_size=0 means no pool — every create() spawns
+    a fresh runtime, _pool stays empty, no refill tasks are scheduled."""
+    registry = await session_registry_factory(session_pool_size=0)
+    await registry.start()
+
+    info = await registry.create()
+
+    assert info.session_id
+    assert registry._pool == []
+    assert registry._refill_tasks == set()
+
+
+async def test_sweeper_ignores_pool_entries(session_registry_factory):
+    """Pool entries live in _pool, not _sessions. The sweeper iterates _sessions
+    only, so pool entries survive an aggressively-aged sweep pass."""
+    registry = await session_registry_factory(session_pool_size=2)
+    await registry.start()
+    await _wait_for_pool_warm(registry)
+
+    # Aggressive sweep — negative threshold makes every active session "expired".
+    # Pool entries are not in _sessions, so they should NOT be touched.
+    await registry._sweep_once(timeout_seconds=-1.0)
+
+    assert registry.list() == []  # _sessions was empty all along
+    assert len(registry._pool) == 2  # pool untouched
+
+
+async def test_aclose_drains_pool_and_active_sessions(session_registry_factory):
+    """aclose() closes every live runtime — pool entries and active sessions both."""
+    registry = await session_registry_factory(session_pool_size=2)
+    await registry.start()
+    await _wait_for_pool_warm(registry)
+    pool_runtimes_before = list(registry._pool)
+
+    info = await registry.create()
+    active_runtime = registry.get_runtime(info.session_id)
+
+    await registry.aclose()
+
+    # Active session runtime closed
+    assert active_runtime._terminated is True
+    # Pool runtimes (those originally in pool) closed
+    for rt in pool_runtimes_before:
+        assert rt._terminated is True
+    # Registry state cleared
+    assert registry.list() == []
+    assert registry._pool == []
+
+
+async def test_aclose_waits_for_pending_refills(session_registry_factory):
+    """aclose() called immediately after start() (while refills are still spawning)
+    awaits the pending tasks before returning, so no spawn task is abandoned."""
+    registry = await session_registry_factory(session_pool_size=2)
+    await registry.start()
+    # Don't wait for pool warm — close immediately.
+
+    await registry.aclose()
+
+    # By the time aclose() returns, every refill task is done.
+    # (Each task's add_done_callback removes itself from the set, so the set is empty.)
+    assert registry._refill_tasks == set()
