@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field, replace
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
+from typing import Protocol, runtime_checkable
 
 import structlog
 
@@ -19,6 +20,13 @@ class SessionNotFound(KeyError):
 
 class SessionBusy(Exception):
     """Raised when an execute is attempted on a session that's already running one."""
+
+class RegistryUnavailable(Exception):
+    """Raised when the registry's backing store (Redis) is unreachable.
+
+    Maps to HTTP 503 (substep-7 Decision 3 — fail hard, no in-memory
+    fallback). Only the Redis backend raises this; in-memory never does.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +50,29 @@ class _Entry:
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+@runtime_checkable
+class SessionRegistry(Protocol):
+    """Structural interface every session-registry backend satisfies.
 
-class SessionRegistry:
+    Two implementations: ``InMemorySessionRegistry`` (single-process, the
+    default) and ``RedisSessionRegistry`` (shared directory + sticky routing
+    across workers, Phase 4 substep 7). App wiring and routes depend on this
+    Protocol, never on a concrete class — the implementation is chosen by
+    ``Settings.session_backend`` via ``build_session_registry``.
+    """
+
+    async def create(self) -> SessionInfo: ...
+    def get_runtime(self, session_id: str) -> SessionRuntime: ...
+    async def get_info(self, session_id: str) -> SessionInfo: ...
+    def acquire_for_execute(
+        self, session_id: str
+    ) -> AbstractAsyncContextManager[SessionRuntime]: ...
+    async def list(self) -> list[SessionInfo]: ...
+    async def delete(self, session_id: str) -> None: ...
+    async def start(self) -> None: ...
+    async def aclose(self) -> None: ...
+
+class InMemorySessionRegistry:
     """In-memory map of session_id → SessionRuntime, with background idle eviction.
 
     Lifecycle: ``__init__`` is cheap and sync. Call ``await start()`` to
@@ -106,7 +135,7 @@ class SessionRegistry:
         entry.info = replace(entry.info, last_used=_utcnow())
         return entry.runtime
 
-    def get_info(self, session_id: str) -> SessionInfo:
+    async def get_info(self, session_id: str) -> SessionInfo:
         """Return the public metadata without touching ``last_used``."""
         entry = self._sessions.get(session_id)
         if entry is None:
@@ -130,7 +159,7 @@ class SessionRegistry:
         async with entry.lock:
             yield entry.runtime
 
-    def list(self) -> list[SessionInfo]:
+    async def list(self) -> list[SessionInfo]:
         """Snapshot of every live session's metadata. Order is unspecified."""
         return [entry.info for entry in self._sessions.values()]
 

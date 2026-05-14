@@ -11,10 +11,11 @@ from kestrel.api.routes import router
 from kestrel.api.sessions import router as sessions_router
 from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
+from kestrel.execution import build_session_registry
 from kestrel.execution.session_registry import (
+    RegistryUnavailable,
     SessionBusy,
     SessionNotFound,
-    SessionRegistry,
 )
 from kestrel.execution.session_runtime import (
     SessionProtocolError,
@@ -32,7 +33,7 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         if settings.executor_backend == "docker":
             await sweep_orphan_containers()
-        registry = SessionRegistry(settings)
+        registry = build_session_registry(settings)
         await registry.start()
         app.state.registry = registry
         try:
@@ -60,6 +61,11 @@ def create_app() -> FastAPI:
     async def _session_protocol(request: Request, exc: SessionProtocolError) -> JSONResponse:
         logger.exception("session_protocol_error")
         return JSONResponse(status_code=500, content={"detail": "internal protocol error"})
+    
+    @app.exception_handler(RegistryUnavailable)
+    async def _registry_unavailable(request: Request, exc: RegistryUnavailable) -> JSONResponse:
+        logger.warning("registry_unavailable")
+        return JSONResponse(status_code=503, content={"detail": "session store unavailable"})
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

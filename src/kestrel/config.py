@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     session_idle_timeout_seconds: float = Field(default=900.0, gt=0, description="Phase 4: max seconds a session may sit without an execute before the sweeper evicts it (15 min default).")
     session_sweep_interval_seconds: float = Field(default=60.0, gt=0, description="Phase 4: how often the background sweeper wakes up to check for idle sessions.")
     session_pool_size: int = Field(default=0, ge=0, description="Phase 4 substep 6: number of pre-started session containers kept warm in the pool. 0 = pool disabled, every POST /sessions cold-starts a new container. Opt-in via KESTREL_SESSION_POOL_SIZE.")
+    session_backend: Literal["memory", "redis"] = Field(default="memory", description="Phase 4 substep 7: session registry backend. 'memory' = single-process in-memory map (default, identical to substep 6 behaviour); 'redis' = shared session directory across workers. Opt-in via KESTREL_SESSION_BACKEND.")
+    redis_url: str = Field(default="redis://localhost:6379/0", description="Phase 4 substep 7: Redis connection URL. Used only when session_backend == 'redis'.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

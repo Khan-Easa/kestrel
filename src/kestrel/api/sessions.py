@@ -50,7 +50,7 @@ async def list_sessions(
     return SessionListResponse(
         sessions=[
             SessionResponse.model_validate(info, from_attributes=True)
-            for info in registry.list()
+            for info in await registry.list()
         ]
     )
 
@@ -63,7 +63,7 @@ async def get_session(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
 ) -> SessionResponse:
-    info = registry.get_info(session_id)
+    info = await registry.get_info(session_id)
     return SessionResponse.model_validate(info, from_attributes=True)
 
 

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+import redis.asyncio
 
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
@@ -13,7 +14,10 @@ from kestrel.execution import get_executor
 from kestrel.execution.docker_executor import DockerExecutor
 from kestrel.execution.manager import SubprocessExecutor
 from kestrel.execution.session_runtime import SessionRuntime
-from kestrel.execution.session_registry import SessionRegistry
+from kestrel.execution.session_registry import InMemorySessionRegistry
+from kestrel.execution.redis_session_registry import RedisSessionRegistry
+
+TEST_REDIS_URL = "redis://localhost:6379/15"  # db 15 — isolated from real data
 
 @lru_cache(maxsize=1)
 def _docker_reachable() -> bool:
@@ -29,6 +33,17 @@ def _docker_reachable() -> bool:
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
+        return False
+    
+@lru_cache(maxsize=1)
+def _redis_reachable() -> bool:
+    """Quick check that a Redis server answers on the test URL."""
+    try:
+        client = redis.Redis.from_url(TEST_REDIS_URL, socket_connect_timeout=2)
+        client.ping()
+        client.close()
+        return True
+    except Exception:
         return False
 
 
@@ -103,7 +118,7 @@ async def session_runtime_factory():
 @pytest.fixture
 async def session_registry_factory():
     """Yields an async factory ``_make(**settings_overrides)`` that builds
-    SessionRegistry instances with reasonable test defaults. Every registry
+    InMemorySessionRegistry instances with reasonable test defaults. Every registry
     created is aclose()'d in teardown — aclose is idempotent so tests may
     call it explicitly too.
 
@@ -114,9 +129,9 @@ async def session_registry_factory():
     if not _docker_reachable():
         pytest.skip("docker daemon unreachable")
 
-    created: list[SessionRegistry] = []
+    created: list[InMemorySessionRegistry] = []
 
-    async def _make(**overrides: Any) -> SessionRegistry:
+    async def _make(**overrides: Any) -> InMemorySessionRegistry:
         defaults = {
             "dev_api_key": "",
             "execute_timeout_seconds": 5.0,
@@ -130,7 +145,7 @@ async def session_registry_factory():
         }
         defaults.update(overrides)
         settings = Settings(**defaults)
-        registry = SessionRegistry(settings=settings)
+        registry = InMemorySessionRegistry(settings=settings)
         created.append(registry)
         return registry
 
@@ -168,3 +183,71 @@ def session_http_client_authed():
 
     with TestClient(app) as client:
         yield client
+
+@pytest.fixture
+async def redis_session_registry_factory():
+    """Yields an async factory ``_make(**settings_overrides)`` that builds
+    *started* RedisSessionRegistry instances pointed at the test Redis db.
+
+    Unlike ``session_registry_factory`` this calls ``start()`` for you — the
+    Redis backend needs a live connection before any method (including
+    ``_sweep_once``) does anything. The test db is flushed before the test
+    and after teardown, so tests start clean and never pollute each other.
+    Calling ``_make`` more than once gives independent registries sharing one
+    Redis db — that is how the cross-worker tests simulate two uvicorn workers.
+    """
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+    if not _redis_reachable():
+        pytest.skip("redis unreachable")
+
+    admin = redis.asyncio.Redis.from_url(TEST_REDIS_URL)
+    await admin.flushdb()
+
+    created: list[RedisSessionRegistry] = []
+
+    await admin.flushdb()
+
+    created: list[RedisSessionRegistry] = []
+
+    async def _make(**overrides: Any) -> RedisSessionRegistry:
+        defaults = {
+            "dev_api_key": "",
+            "execute_timeout_seconds": 5.0,
+            "execute_output_cap_bytes": 1_048_576,
+            "log_level": "INFO",
+            "log_json": False,
+            "executor_backend": "docker",
+            "executor_docker_image": "kestrel-runtime:0.3.0",
+            "session_idle_timeout_seconds": 900.0,
+            "session_sweep_interval_seconds": 60.0,
+            "session_backend": "redis",
+            "redis_url": TEST_REDIS_URL,
+        }
+        defaults.update(overrides)
+        settings = Settings(**defaults)
+        registry = RedisSessionRegistry(settings=settings)
+        await registry.start()
+        created.append(registry)
+        return registry
+
+    try:
+        yield _make
+    finally:
+        for registry in created:
+            await registry.aclose()
+        await admin.flushdb()
+        await admin.aclose()
+
+
+@pytest.fixture
+async def redis_inspector():
+    """A bare redis.asyncio client on the test db — for tests that need to
+    inspect Redis directly (e.g. after a registry has been closed)."""
+    if not _redis_reachable():
+        pytest.skip("redis unreachable")
+    client = redis.asyncio.Redis.from_url(TEST_REDIS_URL)
+    try:
+        yield client
+    finally:
+        await client.aclose()

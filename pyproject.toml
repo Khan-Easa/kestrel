@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
     "structlog>=24.1",
+    "redis[hiredis]>=5.0",
 ]
 
 [project.optional-dependencies]

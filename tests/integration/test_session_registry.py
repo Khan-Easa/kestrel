@@ -22,7 +22,7 @@ async def test_create_returns_session_info(session_registry_factory):
     assert len(info.session_id) == 32  # uuid4().hex
     assert info.created_at == info.last_used
     assert info.created_at.tzinfo is not None
-    assert len(registry.list()) == 1
+    assert len(await registry.list()) == 1
 
 
 async def test_get_runtime_bumps_last_used_but_get_info_does_not(session_registry_factory):
@@ -33,16 +33,16 @@ async def test_get_runtime_bumps_last_used_but_get_info_does_not(session_registr
     sid = info.session_id
 
     # get_info is read-only — last_used should not move.
-    before_info = registry.get_info(sid).last_used
+    before_info = (await registry.get_info(sid)).last_used
     await asyncio.sleep(0.01)
-    after_info = registry.get_info(sid).last_used
+    after_info = (await registry.get_info(sid)).last_used
     assert after_info == before_info
 
     # get_runtime bumps last_used forward.
-    before_runtime = registry.get_info(sid).last_used
+    before_runtime = (await registry.get_info(sid)).last_used
     await asyncio.sleep(0.01)
     registry.get_runtime(sid)
-    after_runtime = registry.get_info(sid).last_used
+    after_runtime = (await registry.get_info(sid)).last_used
     assert after_runtime > before_runtime
 
 
@@ -54,11 +54,11 @@ async def test_list_returns_snapshot(session_registry_factory):
     b = await registry.create()
     c = await registry.create()
 
-    snapshot = registry.list()
+    snapshot = await registry.list()
     assert {s.session_id for s in snapshot} == {a.session_id, b.session_id, c.session_id}
 
     snapshot.pop()  # mutate the returned list
-    assert len(registry.list()) == 3  # registry unaffected
+    assert len(await registry.list()) == 3 # registry unaffected
 
 
 async def test_delete_removes_and_closes_runtime(session_registry_factory):
@@ -70,7 +70,7 @@ async def test_delete_removes_and_closes_runtime(session_registry_factory):
 
     await registry.delete(info.session_id)
 
-    assert registry.list() == []
+    assert await registry.list() == []
     assert runtime._terminated is True
     with pytest.raises(SessionNotFound):
         registry.get_runtime(info.session_id)
@@ -83,7 +83,7 @@ async def test_session_not_found_raises_on_unknown_id(session_registry_factory):
     with pytest.raises(SessionNotFound):
         registry.get_runtime("does-not-exist")
     with pytest.raises(SessionNotFound):
-        registry.get_info("does-not-exist")
+        await registry.get_info("does-not-exist")
     with pytest.raises(SessionNotFound):
         await registry.delete("does-not-exist")
 
@@ -98,11 +98,11 @@ async def test_sweep_evicts_only_idle_sessions(session_registry_factory):
 
     # Generous threshold — nothing has been idle long enough.
     await registry._sweep_once(timeout_seconds=900.0)
-    assert len(registry.list()) == 2
+    assert len(await registry.list()) == 2
 
     # Negative threshold — every session's idle (>= 0) exceeds it.
     await registry._sweep_once(timeout_seconds=-1.0)
-    assert registry.list() == []
+    assert await registry.list() == []
 
     # Empty-registry sweep is a no-op.
     await registry._sweep_once(timeout_seconds=-1.0)
@@ -118,7 +118,7 @@ async def test_aclose_is_idempotent_and_closes_all_runtimes(session_registry_fac
 
     await registry.aclose()
 
-    assert registry.list() == []
+    assert await registry.list() == []
     assert runtime_a._terminated is True
     assert runtime_b._terminated is True
 
@@ -213,7 +213,7 @@ async def test_sweeper_ignores_pool_entries(session_registry_factory):
     # Pool entries are not in _sessions, so they should NOT be touched.
     await registry._sweep_once(timeout_seconds=-1.0)
 
-    assert registry.list() == []  # _sessions was empty all along
+    assert await registry.list() == [] # _sessions was empty all along
     assert len(registry._pool) == 2  # pool untouched
 
 
@@ -235,7 +235,7 @@ async def test_aclose_drains_pool_and_active_sessions(session_registry_factory):
     for rt in pool_runtimes_before:
         assert rt._terminated is True
     # Registry state cleared
-    assert registry.list() == []
+    assert await registry.list() == []
     assert registry._pool == []
 
 
