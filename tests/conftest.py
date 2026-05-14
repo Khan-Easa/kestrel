@@ -206,10 +206,6 @@ async def redis_session_registry_factory():
 
     created: list[RedisSessionRegistry] = []
 
-    await admin.flushdb()
-
-    created: list[RedisSessionRegistry] = []
-
     async def _make(**overrides: Any) -> RedisSessionRegistry:
         defaults = {
             "dev_api_key": "",

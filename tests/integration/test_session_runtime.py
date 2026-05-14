@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 from kestrel.execution.session_runtime import (
-    SessionRuntime,
     SessionTerminated,
     SessionTimeout,
 )

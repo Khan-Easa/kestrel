@@ -65,6 +65,7 @@ async def test_delete_removes_redis_entry_and_closes_runtime(redis_session_regis
     client = registry._client
     assert await client.exists(f"session:{sid}") == 0
     assert not await client.sismember("sessions", sid)
+    assert runtime._terminated is True
     assert sid not in registry._sessions
 
 
