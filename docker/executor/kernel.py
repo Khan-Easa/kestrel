@@ -13,6 +13,8 @@ import ast
 import base64
 import io
 import json
+import mimetypes
+import os
 import sys
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
@@ -21,6 +23,24 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+
+_OUTPUTS_DIR = "/workspace/outputs"
+
+
+def _ensure_outputs_dir() -> None:
+    """Create /workspace/outputs/ at kernel boot. Idempotent.
+
+    Tmpfs mount typically creates the directory itself; this helper
+    handles the dev/test case where no tmpfs is mounted, and is harmless
+    when the directory already exists.
+    """
+    try:
+        os.makedirs(_OUTPUTS_DIR, exist_ok=True)
+    except Exception:
+        print(
+            f"kernel: failed to create {_OUTPUTS_DIR}:\n{traceback.format_exc()}",
+            file=sys.stderr,
+        )
 
 
 def _emit(response: dict) -> None:
@@ -118,8 +138,41 @@ def _capture_dataframe(value: object) -> dict | None:
             file=sys.stderr,
         )
         return None
+    
+def _capture_files() -> list[dict]:
+    """Slurp top-level files in /workspace/outputs, then clear the directory.
+
+    Returns a list of {type, mime_type, filename, data} dicts ready for
+    JSON serialization. On any IO failure, prints a traceback to kernel
+    stderr and returns whatever was captured before the failure.
+    """
+    outputs: list[dict] = []
+    if not os.path.isdir(_OUTPUTS_DIR):
+        return outputs
+    try:
+        for entry in sorted(os.listdir(_OUTPUTS_DIR)):
+            path = os.path.join(_OUTPUTS_DIR, entry)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "rb") as f:
+                contents = f.read()
+            mime_type, _ = mimetypes.guess_type(entry)
+            outputs.append({
+                "type": "file",
+                "mime_type": mime_type or "application/octet-stream",
+                "filename": entry,
+                "data": base64.b64encode(contents).decode("ascii"),
+            })
+            os.unlink(path)
+    except Exception:
+        print(
+            f"kernel: file capture failed:\n{traceback.format_exc()}",
+            file=sys.stderr,
+        )
+    return outputs
 
 def main() -> int:
+    _ensure_outputs_dir()
     namespace: dict = {"__name__": "__main__"}
 
     for line in sys.stdin:
@@ -146,6 +199,7 @@ def main() -> int:
         df_output = _capture_dataframe(captured_value)
         if df_output is not None:
             outputs.append(df_output)
+        outputs.extend(_capture_files())
 
         _emit({
             "id": msg_id,

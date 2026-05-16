@@ -247,3 +247,104 @@ async def test_oversized_dataframe_drops_to_dropped_outputs(session_runtime_fact
     assert response.dropped_outputs[0].type == "dataframe"
     assert response.dropped_outputs[0].reason == "per_output_cap"
     assert response.dropped_outputs[0].size_bytes > 100
+
+
+async def test_file_csv_capture(session_runtime_factory):
+    """A user writing one CSV to /workspace/outputs/ surfaces as a FileOutput."""
+    import base64
+
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "with open('/workspace/outputs/data.csv', 'w') as f:\n"
+        "    f.write('a,b\\n1,2\\n3,4\\n')"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].type == "file"
+    assert response.outputs[0].filename == "data.csv"
+    assert response.outputs[0].mime_type == "text/csv"
+    decoded = base64.b64decode(response.outputs[0].data).decode()
+    assert decoded == "a,b\n1,2\n3,4\n"
+
+
+async def test_multiple_files_captured_in_sorted_order(session_runtime_factory):
+    """Multiple files in /workspace/outputs/ each surface as separate FileOutputs, sorted."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "for name in ['b.txt', 'a.txt', 'c.txt']:\n"
+        "    with open(f'/workspace/outputs/{name}', 'w') as f:\n"
+        "        f.write(name)"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 3
+    assert [o.filename for o in response.outputs] == ['a.txt', 'b.txt', 'c.txt']
+
+
+async def test_binary_file_capture_with_mime(session_runtime_factory):
+    """A binary file (PNG header) is captured with the correct MIME type."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "png_header = b'\\x89PNG\\r\\n\\x1a\\n' + b'\\x00' * 100\n"
+        "with open('/workspace/outputs/img.png', 'wb') as f:\n"
+        "    f.write(png_header)"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].filename == "img.png"
+    assert response.outputs[0].mime_type == "image/png"
+
+
+async def test_oversized_file_drops_to_dropped_outputs(session_runtime_factory):
+    """A file exceeding file_max_bytes is dropped with reason='per_output_cap'."""
+    runtime = await session_runtime_factory(file_max_bytes=100)
+
+    response = await runtime.execute(
+        "with open('/workspace/outputs/big.bin', 'wb') as f:\n"
+        "    f.write(b'x' * 1000)"
+    )
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert len(response.dropped_outputs) == 1
+    assert response.dropped_outputs[0].type == "file"
+    assert response.dropped_outputs[0].filename == "big.bin"
+    assert response.dropped_outputs[0].reason == "per_output_cap"
+    assert response.dropped_outputs[0].size_bytes > 100
+
+
+async def test_file_count_cap_drops_excess_files(session_runtime_factory):
+    """When more than file_max_count files are produced, excess drop with file_count_cap."""
+    runtime = await session_runtime_factory(file_max_count=3)
+
+    response = await runtime.execute(
+        "for i in range(5):\n"
+        "    with open(f'/workspace/outputs/file{i}.txt', 'w') as f:\n"
+        "        f.write(str(i))"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 3
+    assert len(response.dropped_outputs) == 2
+    for drop in response.dropped_outputs:
+        assert drop.type == "file"
+        assert drop.reason == "file_count_cap"
+
+
+async def test_file_written_outside_outputs_dir_not_captured(session_runtime_factory):
+    """Files written to /tmp (not /workspace/outputs/) are not captured."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "with open('/tmp/scratch.txt', 'w') as f:\n"
+        "    f.write('hidden')"
+    )
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert response.dropped_outputs == []

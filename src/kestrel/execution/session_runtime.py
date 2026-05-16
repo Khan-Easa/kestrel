@@ -11,6 +11,7 @@ from kestrel.api.schemas import (
     DataFrameOutput,
     DroppedOutput,
     ExecuteResponse,
+    FileOutput,
     PlotOutput,
     SessionExecuteResponse,
 )
@@ -43,11 +44,15 @@ class SessionRuntime:
         timeout_seconds: float,
         plot_max_bytes: int = 2 * 1024 * 1024,
         dataframe_max_bytes: int = 1 * 1024 * 1024,
+        file_max_bytes: int = 5 * 1024 * 1024,
+        file_max_count: int = 10,
     ) -> None:
         self._image_tag = image_tag
         self._timeout_seconds = timeout_seconds
         self._plot_max_bytes = plot_max_bytes
         self._dataframe_max_bytes = dataframe_max_bytes
+        self._file_max_bytes = file_max_bytes
+        self._file_max_count = file_max_count
         self._proc: asyncio.subprocess.Process | None = None
         self._container_name: str | None = None
         self._stderr_buf = bytearray()
@@ -61,6 +66,8 @@ class SessionRuntime:
         timeout_seconds: float,
         plot_max_bytes: int = 2 * 1024 * 1024,
         dataframe_max_bytes: int = 1 * 1024 * 1024,
+        file_max_bytes: int = 5 * 1024 * 1024,
+        file_max_count: int = 10,
     ) -> SessionRuntime:
         """Spawn the container, attach pipes, return ready-to-use runtime."""
         runtime = cls(
@@ -68,6 +75,8 @@ class SessionRuntime:
             timeout_seconds=timeout_seconds,
             plot_max_bytes=plot_max_bytes,
             dataframe_max_bytes=dataframe_max_bytes,
+            file_max_bytes=file_max_bytes,
+            file_max_count=file_max_count,
         )
         runtime._container_name = f"kestrel-session-{uuid.uuid4().hex}"
 
@@ -79,6 +88,7 @@ class SessionRuntime:
             "--network", "none",
             "--read-only",
             "--tmpfs", "/tmp:size=64m",
+            "--tmpfs", "/workspace/outputs:size=64m,mode=1777",
             "--user", "65534:65534",
             "--memory", "256m",
             "--memory-swap", "256m",
@@ -187,7 +197,30 @@ class SessionRuntime:
                         data=raw["data"],
                         shape=tuple(raw.get("shape", [0, 0])),
                     ))
-
+            elif raw.get("type") == "file":
+                file_count = sum(1 for o in outputs if isinstance(o, FileOutput))
+                size_bytes = len(raw.get("data", ""))
+                filename = raw.get("filename", "")
+                if file_count >= self._file_max_count:
+                    dropped.append(DroppedOutput(
+                        type="file",
+                        reason="file_count_cap",
+                        size_bytes=size_bytes,
+                        filename=filename,
+                    ))
+                elif size_bytes > self._file_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="file",
+                        reason="per_output_cap",
+                        size_bytes=size_bytes,
+                        filename=filename,
+                    ))
+                else:
+                    outputs.append(FileOutput(
+                        mime_type=raw.get("mime_type", "application/octet-stream"),
+                        filename=filename,
+                        data=raw["data"],
+                    ))
         return SessionExecuteResponse(
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),

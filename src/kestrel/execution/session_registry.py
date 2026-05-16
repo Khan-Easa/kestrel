@@ -111,6 +111,8 @@ class InMemorySessionRegistry:
                 timeout_seconds=self._settings.execute_timeout_seconds,
                 plot_max_bytes=self._settings.rich_output_plot_max_bytes,
                 dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
+                file_max_bytes=self._settings.rich_output_file_max_bytes,
+                file_max_count=self._settings.rich_output_file_max_count,
             )
             from_pool = False
 
@@ -253,6 +255,8 @@ class InMemorySessionRegistry:
                 timeout_seconds=self._settings.execute_timeout_seconds,
                 plot_max_bytes=self._settings.rich_output_plot_max_bytes,
                 dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
+                file_max_bytes=self._settings.rich_output_file_max_bytes,
+                file_max_count=self._settings.rich_output_file_max_count,
             )
         except Exception:
             _logger.exception("pool_refill_failed")
