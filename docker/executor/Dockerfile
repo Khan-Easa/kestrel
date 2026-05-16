@@ -5,10 +5,14 @@ LABEL org.opencontainers.image.source="https://github.com/Khan-Easa/kestrel"
 LABEL org.opencontainers.image.description="Kestrel sandboxed Python execution runtime"
 LABEL org.opencontainers.image.licenses="MIT"
 
+ENV MPLBACKEND=Agg
+
 RUN groupadd --system --gid 65534 sandbox 2>/dev/null || true \
 && useradd --system --uid 65534 --gid 65534 \
             --no-create-home --shell /usr/sbin/nologin \
             sandbox 2>/dev/null || true
+
+RUN pip install --no-cache-dir --only-binary :all: 'matplotlib>=3.8' 'pandas>=2.0'
 
 WORKDIR /sandbox
 USER 65534:65534
