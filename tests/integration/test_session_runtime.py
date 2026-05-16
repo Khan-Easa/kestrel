@@ -95,3 +95,67 @@ async def test_close_cleans_up_container(session_runtime_factory):
     assert stdout.decode().strip() == "", (
         f"container {container_name} still exists after close()"
     )
+
+async def test_simple_plot_capture(session_runtime_factory):
+    """A single plt.plot creates one figure; capture surfaces one PlotOutput."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "import matplotlib.pyplot as plt\n"
+        "plt.plot([1, 2, 3])"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].type == "plot"
+    assert response.outputs[0].mime_type == "image/png"
+    assert response.outputs[0].data  # non-empty base64 string
+    assert response.dropped_outputs == []
+
+
+async def test_multi_figure_cell_captures_all_figures(session_runtime_factory):
+    """Three plt.figure() calls in one execute produce three PlotOutputs."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "import matplotlib.pyplot as plt\n"
+        "for i in range(3):\n"
+        "    plt.figure()\n"
+        "    plt.plot([i, i + 1])"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 3
+    assert all(o.type == "plot" for o in response.outputs)
+    assert len(response.outputs) == 3
+    assert all(o.type == "plot" for o in response.outputs)
+    assert response.dropped_outputs == []
+
+
+async def test_no_figure_cell_has_empty_outputs(session_runtime_factory):
+    """Code that produces no plot leaves outputs and dropped_outputs empty."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute("print('hello')")
+
+    assert response.exit_code == 0
+    assert response.stdout == "hello\n"
+    assert response.outputs == []
+    assert response.dropped_outputs == []
+
+
+async def test_oversized_plot_drops_to_dropped_outputs(session_runtime_factory):
+    """A plot exceeding plot_max_bytes is dropped, surfacing in dropped_outputs."""
+    runtime = await session_runtime_factory(plot_max_bytes=100)
+
+    response = await runtime.execute(
+        "import matplotlib.pyplot as plt\n"
+        "plt.plot([1, 2, 3])"
+    )
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert len(response.dropped_outputs) == 1
+    assert response.dropped_outputs[0].type == "plot"
+    assert response.dropped_outputs[0].reason == "per_output_cap"
+    assert response.dropped_outputs[0].size_bytes > 100

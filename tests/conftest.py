@@ -100,10 +100,11 @@ async def session_runtime_factory():
 
     started: list[SessionRuntime] = []
 
-    async def _make(timeout_seconds: float = 5.0) -> SessionRuntime:
+    async def _make(timeout_seconds: float = 5.0, **kwargs) -> SessionRuntime:
         runtime = await SessionRuntime.start(
-            image_tag="kestrel-runtime:0.3.0",
+            image_tag=get_settings().executor_docker_image,
             timeout_seconds=timeout_seconds,
+            **kwargs,
         )
         started.append(runtime)
         return runtime

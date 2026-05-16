@@ -7,7 +7,12 @@ import uuid
 
 import structlog
 
-from kestrel.api.schemas import ExecuteResponse
+from kestrel.api.schemas import (
+    DroppedOutput,
+    ExecuteResponse,
+    PlotOutput,
+    SessionExecuteResponse,
+)
 
 _STDERR_CAP_BYTES = 64 * 1024
 
@@ -31,9 +36,15 @@ class SessionRuntime:
     or a timeout-induced termination.
     """
     
-    def __init__(self, image_tag: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        image_tag: str,
+        timeout_seconds: float,
+        plot_max_bytes: int = 2 * 1024 * 1024,
+    ) -> None:
         self._image_tag = image_tag
         self._timeout_seconds = timeout_seconds
+        self._plot_max_bytes = plot_max_bytes
         self._proc: asyncio.subprocess.Process | None = None
         self._container_name: str | None = None
         self._stderr_buf = bytearray()
@@ -41,9 +52,18 @@ class SessionRuntime:
         self._terminated = False
 
     @classmethod
-    async def start(cls, image_tag: str, timeout_seconds: float) -> SessionRuntime:
+    async def start(
+        cls,
+        image_tag: str,
+        timeout_seconds: float,
+        plot_max_bytes: int = 2 * 1024 * 1024,
+    ) -> SessionRuntime:
         """Spawn the container, attach pipes, return ready-to-use runtime."""
-        runtime = cls(image_tag=image_tag, timeout_seconds=timeout_seconds)
+        runtime = cls(
+            image_tag=image_tag,
+            timeout_seconds=timeout_seconds,
+            plot_max_bytes=plot_max_bytes,
+        )
         runtime._container_name = f"kestrel-session-{uuid.uuid4().hex}"
 
         cmd = [
@@ -69,6 +89,7 @@ class SessionRuntime:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=16 * 1024 * 1024,
         )
         runtime._stderr_task = asyncio.create_task(runtime._drain_stderr())
 
@@ -79,7 +100,7 @@ class SessionRuntime:
         )
         return runtime
     
-    async def execute(self, code: str) -> ExecuteResponse:
+    async def execute(self, code: str) -> SessionExecuteResponse:
         """Send one execute message; await one reply.
 
         Raises ``SessionTerminated`` if the session is already dead,
@@ -134,7 +155,22 @@ class SessionRuntime:
 
         duration_ms = int((time.perf_counter() - start) * 1000)
 
-        return ExecuteResponse(
+        raw_outputs = data.get("outputs", [])
+        outputs: list = []
+        dropped: list[DroppedOutput] = []
+        for raw in raw_outputs:
+            if raw.get("type") == "plot":
+                size_bytes = len(raw.get("data", ""))
+                if size_bytes > self._plot_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="plot",
+                        reason="per_output_cap",
+                        size_bytes=size_bytes,
+                    ))
+                else:
+                    outputs.append(PlotOutput(data=raw["data"]))
+
+        return SessionExecuteResponse(
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),
             exit_code=int(data.get("exit_code", 0)),
@@ -142,6 +178,8 @@ class SessionRuntime:
             timed_out=False,
             stdout_truncated=False,
             stderr_truncated=False,
+            outputs=outputs,
+            dropped_outputs=dropped,
         )
     
     async def close(self) -> None:
