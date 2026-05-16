@@ -110,6 +110,7 @@ class InMemorySessionRegistry:
                 image_tag=self._settings.executor_docker_image,
                 timeout_seconds=self._settings.execute_timeout_seconds,
                 plot_max_bytes=self._settings.rich_output_plot_max_bytes,
+                dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
             )
             from_pool = False
 
@@ -251,6 +252,7 @@ class InMemorySessionRegistry:
                 image_tag=self._settings.executor_docker_image,
                 timeout_seconds=self._settings.execute_timeout_seconds,
                 plot_max_bytes=self._settings.rich_output_plot_max_bytes,
+                dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
             )
         except Exception:
             _logger.exception("pool_refill_failed")

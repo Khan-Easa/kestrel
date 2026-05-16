@@ -159,3 +159,91 @@ async def test_oversized_plot_drops_to_dropped_outputs(session_runtime_factory):
     assert response.dropped_outputs[0].type == "plot"
     assert response.dropped_outputs[0].reason == "per_output_cap"
     assert response.dropped_outputs[0].size_bytes > 100
+
+async def test_dataframe_last_expression_captured(session_runtime_factory):
+    """A DataFrame as the last expression in a cell produces a DataFrameOutput."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "import pandas as pd\n"
+        "pd.DataFrame({'a': [1, 2, 3], 'b': [4, 5, 6]})"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].type == "dataframe"
+    assert response.outputs[0].shape == (3, 2)
+    assert response.outputs[0].data["columns"] == ["a", "b"]
+    assert response.dropped_outputs == []
+
+
+async def test_non_dataframe_last_expression_is_ignored(session_runtime_factory):
+    """A non-DataFrame last expression (e.g. an int) produces no rich output."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute("1 + 1")
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert response.dropped_outputs == []
+
+
+async def test_empty_cell_has_no_outputs(session_runtime_factory):
+    """An empty (whitespace-only) cell produces nothing — no error, no output."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute("   \n   ")
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert response.dropped_outputs == []
+
+
+async def test_multiple_statements_with_dataframe_last(session_runtime_factory):
+    """A cell with setup statements followed by a DataFrame captures only the last."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "import pandas as pd\n"
+        "x = 5\n"
+        "y = 10\n"
+        "pd.DataFrame({'sum': [x + y]})"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].type == "dataframe"
+    assert response.outputs[0].data["data"] == [[15]]
+
+
+async def test_exception_before_dataframe_produces_no_output(session_runtime_factory):
+    """If user code raises before reaching the last expression, no DataFrame surfaces."""
+    runtime = await session_runtime_factory()
+
+    response = await runtime.execute(
+        "import pandas as pd\n"
+        "raise ValueError('boom')\n"
+        "pd.DataFrame({'a': [1]})"  # never reached
+    )
+
+    assert response.exit_code == 1
+    assert "ValueError" in response.stderr
+    assert response.outputs == []
+    assert response.dropped_outputs == []
+
+
+async def test_oversized_dataframe_drops_to_dropped_outputs(session_runtime_factory):
+    """A DataFrame whose JSON payload exceeds dataframe_max_bytes is dropped."""
+    runtime = await session_runtime_factory(dataframe_max_bytes=100)
+
+    response = await runtime.execute(
+        "import pandas as pd\n"
+        "pd.DataFrame({'a': list(range(1000))})"  # JSON >> 100 bytes
+    )
+
+    assert response.exit_code == 0
+    assert response.outputs == []
+    assert len(response.dropped_outputs) == 1
+    assert response.dropped_outputs[0].type == "dataframe"
+    assert response.dropped_outputs[0].reason == "per_output_cap"
+    assert response.dropped_outputs[0].size_bytes > 100

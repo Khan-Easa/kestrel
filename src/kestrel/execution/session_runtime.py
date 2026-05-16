@@ -8,6 +8,7 @@ import uuid
 import structlog
 
 from kestrel.api.schemas import (
+    DataFrameOutput,
     DroppedOutput,
     ExecuteResponse,
     PlotOutput,
@@ -41,10 +42,12 @@ class SessionRuntime:
         image_tag: str,
         timeout_seconds: float,
         plot_max_bytes: int = 2 * 1024 * 1024,
+        dataframe_max_bytes: int = 1 * 1024 * 1024,
     ) -> None:
         self._image_tag = image_tag
         self._timeout_seconds = timeout_seconds
         self._plot_max_bytes = plot_max_bytes
+        self._dataframe_max_bytes = dataframe_max_bytes
         self._proc: asyncio.subprocess.Process | None = None
         self._container_name: str | None = None
         self._stderr_buf = bytearray()
@@ -57,12 +60,14 @@ class SessionRuntime:
         image_tag: str,
         timeout_seconds: float,
         plot_max_bytes: int = 2 * 1024 * 1024,
+        dataframe_max_bytes: int = 1 * 1024 * 1024,
     ) -> SessionRuntime:
         """Spawn the container, attach pipes, return ready-to-use runtime."""
         runtime = cls(
             image_tag=image_tag,
             timeout_seconds=timeout_seconds,
             plot_max_bytes=plot_max_bytes,
+            dataframe_max_bytes=dataframe_max_bytes,
         )
         runtime._container_name = f"kestrel-session-{uuid.uuid4().hex}"
 
@@ -169,6 +174,19 @@ class SessionRuntime:
                     ))
                 else:
                     outputs.append(PlotOutput(data=raw["data"]))
+            elif raw.get("type") == "dataframe":
+                payload_size = len(json.dumps(raw.get("data", {})))
+                if payload_size > self._dataframe_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="dataframe",
+                        reason="per_output_cap",
+                        size_bytes=payload_size,
+                    ))
+                else:
+                    outputs.append(DataFrameOutput(
+                        data=raw["data"],
+                        shape=tuple(raw.get("shape", [0, 0])),
+                    ))
 
         return SessionExecuteResponse(
             stdout=data.get("stdout", ""),
