@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,3 +25,40 @@ class SessionResponse(BaseModel):
 
 class SessionListResponse(BaseModel):
     sessions: list[SessionResponse] = Field(default_factory=list, description="All currently-active sessions known to this process.")
+
+class PlotOutput(BaseModel):
+    type: Literal["plot"] = "plot"
+    mime_type: Literal["image/png"] = "image/png"
+    data: str = Field(description="Base64-encoded PNG bytes.")
+
+
+class DataFrameOutput(BaseModel):
+    type: Literal["dataframe"] = "dataframe"
+    mime_type: Literal["application/json"] = "application/json"
+    data: dict = Field(description="DataFrame serialised via to_dict(orient='split'): {'index': [...], 'columns': [...], 'data': [[...]]}.")
+    shape: tuple[int, int] = Field(description="(n_rows, n_cols) of the captured DataFrame.")
+
+
+class FileOutput(BaseModel):
+    type: Literal["file"] = "file"
+    mime_type: str = Field(description="MIME type guessed from the file extension, e.g. text/csv, image/png, application/pdf.")
+    filename: str = Field(description="Filename relative to /workspace/outputs/, e.g. report.csv.")
+    data: str = Field(description="Base64-encoded file bytes.")
+
+
+RichOutput = Annotated[
+    PlotOutput | DataFrameOutput | FileOutput,
+    Field(discriminator="type"),
+]
+
+
+class DroppedOutput(BaseModel):
+    type: Literal["plot", "dataframe", "file"] = Field(description="Which output type was dropped.")
+    reason: Literal["per_output_cap", "total_cap", "file_count_cap"] = Field(description="Why the output was dropped.")
+    size_bytes: int = Field(ge=0, description="Size in bytes of the dropped output's encoded form.")
+    filename: str | None = Field(default=None, description="Filename, set only for file drops; None for plot and dataframe drops.")
+
+
+class SessionExecuteResponse(ExecuteResponse):
+    outputs: list[RichOutput] = Field(default_factory=list, description="Phase 5: rich outputs captured during this execute. Empty when the cell produced none.")
+    dropped_outputs: list[DroppedOutput] = Field(default_factory=list, description="Phase 5: outputs that were captured but exceeded a size or count cap. Surfaces what was lost without polluting stdout/stderr.")

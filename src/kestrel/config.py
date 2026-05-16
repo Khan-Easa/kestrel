@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     session_pool_size: int = Field(default=0, ge=0, description="Phase 4 substep 6: number of pre-started session containers kept warm in the pool. 0 = pool disabled, every POST /sessions cold-starts a new container. Opt-in via KESTREL_SESSION_POOL_SIZE.")
     session_backend: Literal["memory", "redis"] = Field(default="memory", description="Phase 4 substep 7: session registry backend. 'memory' = single-process in-memory map (default, identical to substep 6 behaviour); 'redis' = shared session directory across workers. Opt-in via KESTREL_SESSION_BACKEND.")
     redis_url: str = Field(default="redis://localhost:6379/0", description="Phase 4 substep 7: Redis connection URL. Used only when session_backend == 'redis'.")
+    rich_output_plot_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0, description="Phase 5: per-plot byte cap. Plots whose base64-encoded PNG exceeds this are dropped into dropped_outputs with reason='per_output_cap'.")
+    rich_output_dataframe_max_bytes: int = Field(default=1 * 1024 * 1024, gt=0, description="Phase 5: per-DataFrame byte cap measured against the JSON-encoded data + shape payload. Dropped with reason='per_output_cap'.")
+    rich_output_file_max_bytes: int = Field(default=5 * 1024 * 1024, gt=0, description="Phase 5: per-file byte cap for files written to /workspace/outputs/. Dropped with reason='per_output_cap'.")
+    rich_output_total_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, description="Phase 5: per-execute total byte cap across all rich outputs combined. Once exceeded, remaining outputs are dropped with reason='total_cap'.")
+    rich_output_file_max_count: int = Field(default=10, gt=0, description="Phase 5: max number of files captured per execute. Excess files are dropped with reason='file_count_cap'.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
