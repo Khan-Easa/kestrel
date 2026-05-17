@@ -62,3 +62,31 @@ class DroppedOutput(BaseModel):
 class SessionExecuteResponse(ExecuteResponse):
     outputs: list[RichOutput] = Field(default_factory=list, description="Phase 5: rich outputs captured during this execute. Empty when the cell produced none.")
     dropped_outputs: list[DroppedOutput] = Field(default_factory=list, description="Phase 5: outputs that were captured but exceeded a size or count cap. Surfaces what was lost without polluting stdout/stderr.")
+
+
+class StreamStdoutChunk(BaseModel):
+    type: Literal["stdout"] = "stdout"
+    data: str = Field(description="Phase 6: one chunk of stdout text. Per-write granularity from the kernel's _StreamingWriter — print('hello') typically yields two chunks ('hello' + '\\n').")
+
+
+class StreamStderrChunk(BaseModel):
+    type: Literal["stderr"] = "stderr"
+    data: str = Field(description="Phase 6: one chunk of stderr text. Same per-write granularity as stdout.")
+
+
+class StreamHeartbeat(BaseModel):
+    type: Literal["heartbeat"] = "heartbeat"
+    elapsed_ms: int = Field(ge=0, description="Phase 6: milliseconds since the execute started. Emitted every Settings.stream_heartbeat_seconds when no other message has been sent in that window.")
+
+
+class StreamResult(SessionExecuteResponse):
+    type: Literal["result"] = "result"
+
+
+class StreamError(BaseModel):
+    type: Literal["error"] = "error"
+    code: str = Field(description="Phase 6: short stable error code, e.g. session_not_found, session_busy, session_terminated, internal.")
+    detail: str = Field(description="Phase 6: human-readable error message; not stable enough for clients to switch on.")
+
+
+StreamMessage = Annotated[ StreamStdoutChunk | StreamStderrChunk | StreamHeartbeat | StreamResult | StreamError, Field(discriminator="type"), ]
