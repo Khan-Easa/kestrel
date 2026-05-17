@@ -219,3 +219,69 @@ def test_stream_disconnect_mid_execute_terminates_session(session_http_client):
         json={"code": "print(1)"},
     )
     assert follow_up.status_code == 410
+
+
+def test_stream_emits_heartbeat_during_silent_interval(session_http_client_factory):
+    """With a short heartbeat interval and a sleeping kernel, at least one
+    heartbeat message arrives before the kernel's print + result."""
+    client = session_http_client_factory(stream_heartbeat_seconds=0.5)
+    sid = client.post("/sessions").json()["session_id"]
+
+    messages: list[dict] = []
+    with client.websocket_connect(f"/sessions/{sid}/execute/stream") as ws:
+        ws.send_text('{"code": "import time; time.sleep(2); print(\\"done\\")"}')
+        while True:
+            msg = ws.receive_json()
+            messages.append(msg)
+            if msg["type"] == "result":
+                break
+
+    heartbeats = [m for m in messages if m["type"] == "heartbeat"]
+    assert len(heartbeats) >= 1, f"expected at least 1 heartbeat, got messages={messages}"
+    # elapsed_ms field is monotonically non-decreasing across heartbeats.
+    elapsed = [h["elapsed_ms"] for h in heartbeats]
+    assert elapsed == sorted(elapsed)
+    assert all(e >= 0 for e in elapsed)
+
+
+
+def test_stream_no_heartbeat_during_active_streaming(session_http_client_factory):
+    """When the kernel is emitting chunks faster than the heartbeat interval,
+    no heartbeat fires (the reset event keeps restarting the silence timer)."""
+    client = session_http_client_factory(stream_heartbeat_seconds=0.5)
+    sid = client.post("/sessions").json()["session_id"]
+
+    messages: list[dict] = []
+    with client.websocket_connect(f"/sessions/{sid}/execute/stream") as ws:
+        # 10 prints over ~1s, each well under the 0.5s heartbeat interval.
+        ws.send_text(
+            '{"code": "import time\\nfor i in range(10):\\n    print(i); time.sleep(0.1)"}'
+        )
+        while True:
+            msg = ws.receive_json()
+            messages.append(msg)
+            if msg["type"] == "result":
+                break
+
+    heartbeats = [m for m in messages if m["type"] == "heartbeat"]
+    # Allow at most 1 to account for kernel startup latency racing the first
+    # heartbeat tick; without the reset mechanism we'd expect ~2.
+    assert len(heartbeats) <= 1, f"expected 0-1 heartbeats during active streaming, got {len(heartbeats)}: {messages}"
+
+
+def test_stream_heartbeat_disabled_when_seconds_zero(session_http_client_factory):
+    """stream_heartbeat_seconds=0 disables heartbeats entirely."""
+    client = session_http_client_factory(stream_heartbeat_seconds=0.0)
+    sid = client.post("/sessions").json()["session_id"]
+
+    messages: list[dict] = []
+    with client.websocket_connect(f"/sessions/{sid}/execute/stream") as ws:
+        ws.send_text('{"code": "import time; time.sleep(2); print(\\"done\\")"}')
+        while True:
+            msg = ws.receive_json()
+            messages.append(msg)
+            if msg["type"] == "result":
+                break
+
+    heartbeats = [m for m in messages if m["type"] == "heartbeat"]
+    assert heartbeats == [], f"expected 0 heartbeats with stream_heartbeat_seconds=0, got {heartbeats}"

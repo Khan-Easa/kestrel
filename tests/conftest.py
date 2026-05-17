@@ -185,6 +185,38 @@ def session_http_client_authed():
     with TestClient(app) as client:
         yield client
 
+
+@pytest.fixture
+def session_http_client_factory():
+    """Factory fixture: ``_make(**settings_overrides)`` returns a TestClient
+    whose ``get_settings`` dependency is overridden to a copy of the current
+    Settings with the supplied fields swapped in.
+
+    Used by Phase 6 substep 5 tests to vary ``stream_heartbeat_seconds`` and
+    ``stream_backpressure_timeout_seconds`` per-test. Each client started via
+    the factory is properly entered (so the FastAPI lifespan fires and the
+    session registry is built) and is cleaned up in fixture teardown.
+    """
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+
+    entered: list[TestClient] = []
+
+    def _make(**settings_overrides: Any) -> TestClient:
+        app = create_app()
+        defaults = get_settings()
+        merged = defaults.model_copy(update=settings_overrides)
+        app.dependency_overrides[get_settings] = lambda: merged
+        client = TestClient(app)
+        client.__enter__()
+        entered.append(client)
+        return client
+
+    yield _make
+
+    for client in entered:
+        client.__exit__(None, None, None)
+
 @pytest.fixture
 async def redis_session_registry_factory():
     """Yields an async factory ``_make(**settings_overrides)`` that builds

@@ -19,11 +19,12 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 
 import structlog
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
-from kestrel.api.schemas import ExecuteRequest, StreamError
+from kestrel.api.schemas import ExecuteRequest, StreamError, StreamHeartbeat
 from kestrel.config import Settings, get_settings
 from kestrel.execution.session_registry import (
     SessionBusy,
@@ -39,11 +40,6 @@ from kestrel.execution.session_runtime import (
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/sessions", tags=["sessions-stream"])
-
-# Substep 4 module constant; substep 5 promotes to Settings.stream_backpressure_timeout_seconds.
-# Per design lock 6-backpressure: 30s cap on consecutive back-pressured send
-# attempts before the safety disconnect closes the WebSocket.
-_STREAM_BACKPRESSURE_TIMEOUT_SECONDS = 30.0
 
 
 def get_session_registry(websocket: WebSocket) -> SessionRegistry:
@@ -153,26 +149,68 @@ async def execute_in_session_stream(
         await _safe_close(websocket, 1011, "bad_request")
         return
 
-    # Background task that blocks on receive() and completes on client disconnect.
+    # Shared state for the main loop + heartbeat task.
+    # - send_lock serializes WebSocket sends (the main loop and the heartbeat
+    #   task both call send_json; starlette doesn't support concurrent sends
+    #   on one connection).
+    # - heartbeat_reset signals "another message was just sent" so the
+    #   heartbeat task can restart its silence timer instead of firing.
+    # - start_perf is the execute start time for the elapsed_ms field on
+    #   heartbeat messages.
+    start_perf = time.perf_counter()
+    send_lock = asyncio.Lock()
+    heartbeat_reset = asyncio.Event()
+    backpressure_timeout = settings.stream_backpressure_timeout_seconds
+    heartbeat_seconds = settings.stream_heartbeat_seconds
+
+    # Background task: detect client disconnect.
     # starlette's send_*() doesn't reliably raise WebSocketDisconnect when the
     # client has closed (the close frame may not have been processed yet at the
-    # moment of send). receive() DOES raise WebSocketDisconnect cleanly. We race
-    # this against each send with asyncio.wait(FIRST_COMPLETED) to honour
-    # design lock 6-disconnect: kill the kernel as soon as the client is gone.
+    # moment of send). receive_text() DOES raise WebSocketDisconnect cleanly.
+    # We race this against each send with asyncio.wait(FIRST_COMPLETED).
     async def _wait_for_disconnect() -> None:
-        # receive_text() raises WebSocketDisconnect cleanly when the client
-        # closes; the low-level receive() returns the websocket.disconnect
-        # message and then errors on the NEXT call with RuntimeError, which
-        # would escape the try/except. Substep 4 contract is one execute
-        # request per connection, so any mid-execute client text is undefined
-        # behavior — silently swallowing it is acceptable.
         try:
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             return
 
+    # Background task: emit StreamHeartbeat during silent intervals.
+    # Per design lock 6-progress: send a heartbeat every stream_heartbeat_seconds
+    # IF no other message has been sent in that window. The reset event is set
+    # by the main loop after each successful send, which causes this task's
+    # wait_for to return (instead of timing out + sending). stream_heartbeat_seconds
+    # == 0 disables heartbeats entirely.
+    async def _heartbeat_loop() -> None:
+        if heartbeat_seconds <= 0:
+            return
+        while True:
+            try:
+                await asyncio.wait_for(
+                    heartbeat_reset.wait(),
+                    timeout=heartbeat_seconds,
+                )
+                # Another message was sent — clear the reset flag and loop.
+                heartbeat_reset.clear()
+            except asyncio.TimeoutError:
+                # Silent interval — send a heartbeat, then loop.
+                elapsed_ms = int((time.perf_counter() - start_perf) * 1000)
+                try:
+                    async with send_lock:
+                        await asyncio.wait_for(
+                            websocket.send_json(
+                                StreamHeartbeat(elapsed_ms=elapsed_ms).model_dump()
+                            ),
+                            timeout=backpressure_timeout,
+                        )
+                except (WebSocketDisconnect, asyncio.TimeoutError, RuntimeError):
+                    # Connection is dead/closing/back-pressured beyond limit.
+                    # The main loop's next send will trigger the proper cleanup
+                    # (kill runtime + close WebSocket); we just exit silently.
+                    return
+
     disconnect_task = asyncio.create_task(_wait_for_disconnect())
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
     try:
         try:
@@ -180,7 +218,6 @@ async def execute_in_session_stream(
                 try:
                     async for message in runtime.execute_stream(execute_request.code):
                         if disconnect_task.done():
-                            # Client disconnected between iterations.
                             logger.info(
                                 "session_stream_client_disconnect_mid_execute",
                                 session_id_prefix=session_id[:8],
@@ -188,38 +225,42 @@ async def execute_in_session_stream(
                             await runtime.close()
                             return
 
-                        send_task = asyncio.create_task(
-                            websocket.send_json(message.model_dump(mode="json"))
-                        )
-                        done, _pending = await asyncio.wait(
-                            [send_task, disconnect_task],
-                            timeout=_STREAM_BACKPRESSURE_TIMEOUT_SECONDS,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-
-                        if not done:
-                            # Back-pressure safety: neither send nor disconnect completed in window.
-                            send_task.cancel()
-                            logger.warning(
-                                "session_stream_backpressure_timeout",
-                                session_id_prefix=session_id[:8],
-                                timeout_seconds=_STREAM_BACKPRESSURE_TIMEOUT_SECONDS,
+                        async with send_lock:
+                            send_task = asyncio.create_task(
+                                websocket.send_json(message.model_dump(mode="json"))
                             )
-                            await runtime.close()
-                            await _safe_close(websocket, 1011, "backpressure_timeout")
-                            return
-
-                        if disconnect_task in done:
-                            send_task.cancel()
-                            logger.info(
-                                "session_stream_client_disconnect_mid_execute",
-                                session_id_prefix=session_id[:8],
+                            done, _pending = await asyncio.wait(
+                                [send_task, disconnect_task],
+                                timeout=backpressure_timeout,
+                                return_when=asyncio.FIRST_COMPLETED,
                             )
-                            await runtime.close()
-                            return
 
-                        # send_task completed — propagate any exception it raised.
-                        send_task.result()
+                            if not done:
+                                send_task.cancel()
+                                logger.warning(
+                                    "session_stream_backpressure_timeout",
+                                    session_id_prefix=session_id[:8],
+                                    timeout_seconds=backpressure_timeout,
+                                )
+                                await runtime.close()
+                                await _safe_close(websocket, 1011, "backpressure_timeout")
+                                return
+
+                            if disconnect_task in done:
+                                send_task.cancel()
+                                logger.info(
+                                    "session_stream_client_disconnect_mid_execute",
+                                    session_id_prefix=session_id[:8],
+                                )
+                                await runtime.close()
+                                return
+
+                            # send_task completed — propagate any exception it raised.
+                            send_task.result()
+
+                        # Reset heartbeat AFTER successful send (outside the lock
+                        # so the heartbeat task can promptly observe the reset).
+                        heartbeat_reset.set()
                 except SessionTimeout:
                     logger.info(
                         "session_stream_timeout",
@@ -244,16 +285,16 @@ async def execute_in_session_stream(
             await _safe_close(websocket, 4409, "session_busy")
             return
         except SessionNotFound:
-            # Race: session was deleted between the handshake check and acquire.
             await _safe_close(websocket, 4404, "session_not_found")
             return
     finally:
-        if not disconnect_task.done():
-            disconnect_task.cancel()
-        try:
-            await disconnect_task
-        except (asyncio.CancelledError, WebSocketDisconnect):
-            pass
+        for task in (disconnect_task, heartbeat_task):
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                pass
 
     await _safe_close(websocket, 1000, "")
     logger.info("session_stream_closed", session_id_prefix=session_id[:8], code=1000)

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     rich_output_file_max_bytes: int = Field(default=5 * 1024 * 1024, gt=0, description="Phase 5: per-file byte cap for files written to /workspace/outputs/. Dropped with reason='per_output_cap'.")
     rich_output_total_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0, description="Phase 5: per-execute total byte cap across all rich outputs combined. Once exceeded, remaining outputs are dropped with reason='total_cap'.")
     rich_output_file_max_count: int = Field(default=10, gt=0, description="Phase 5: max number of files captured per execute. Excess files are dropped with reason='file_count_cap'.")
+    stream_heartbeat_seconds: float = Field(default=5.0, ge=0.0, description="Phase 6: cadence (seconds) of WebSocket-streaming heartbeat messages emitted during silent intervals. Reset on every other message sent. Set to 0.0 to disable heartbeats entirely.")
+    stream_backpressure_timeout_seconds: float = Field(default=30.0, gt=0.0, description="Phase 6: per-send back-pressure safety cap. If a single WebSocket send (chunk or heartbeat) can't drain within this window, the streaming runtime kills the kernel and closes the connection with code 1011.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
