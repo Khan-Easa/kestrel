@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request, status
 from kestrel.api.auth import require_api_key
 from kestrel.api.schemas import (
     ExecuteRequest,
-    ExecuteResponse,
+    SessionExecuteResponse,
     SessionListResponse,
     SessionResponse,
 )
@@ -80,13 +80,13 @@ async def delete_session(
 
 @router.post(
     "/{session_id}/execute",
-    response_model=ExecuteResponse,
+    response_model=SessionExecuteResponse,
 )
 async def execute_in_session(
     session_id: str,
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
-) -> ExecuteResponse:
+) -> SessionExecuteResponse:
     try:
         async with registry.acquire_for_execute(session_id) as runtime:
             result = await runtime.execute(req.code)
@@ -95,7 +95,7 @@ async def execute_in_session(
             "session_execute_timed_out",
             session_id_prefix=session_id[:8],
         )
-        return ExecuteResponse(timed_out=True, exit_code=-1)
+        return SessionExecuteResponse(timed_out=True, exit_code=-1, outputs=[])
 
     logger.info(
         "session_execute_completed",

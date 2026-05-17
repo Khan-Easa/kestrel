@@ -151,3 +151,30 @@ def test_session_endpoints_require_auth_when_key_set(session_http_client_authed)
         headers={"Authorization": "Bearer test-secret-12345"},
     )
     assert authed.status_code == 200
+
+
+def test_session_execute_response_carries_rich_outputs(session_http_client):
+    """Substep 7: POST /sessions/{id}/execute returns a SessionExecuteResponse
+    with outputs and dropped_outputs in the JSON body."""
+    sid = session_http_client.post("/sessions").json()["session_id"]
+
+    response = session_http_client.post(
+        f"/sessions/{sid}/execute",
+        json={
+            "code": (
+                "import matplotlib.pyplot as plt\n"
+                "plt.plot([1, 2, 3])"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exit_code"] == 0
+    assert "outputs" in body
+    assert "dropped_outputs" in body
+    assert len(body["outputs"]) == 1
+    assert body["outputs"][0]["type"] == "plot"
+    assert body["outputs"][0]["mime_type"] == "image/png"
+    assert body["outputs"][0]["data"]
+    assert body["dropped_outputs"] == []

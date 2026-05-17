@@ -348,3 +348,48 @@ async def test_file_written_outside_outputs_dir_not_captured(session_runtime_fac
     assert response.exit_code == 0
     assert response.outputs == []
     assert response.dropped_outputs == []
+
+
+async def test_total_cap_drops_trailing_outputs(session_runtime_factory):
+    """Once the running total exceeds total_max_bytes, subsequent outputs drop with total_cap."""
+    # 750 raw bytes -> 1000 base64 chars per file. total_max_bytes=2500 fits 2 files.
+    runtime = await session_runtime_factory(total_max_bytes=2500)
+
+    response = await runtime.execute(
+        "for name in ('a.bin', 'b.bin', 'c.bin'):\n"
+        "    with open(f'/workspace/outputs/{name}', 'wb') as f:\n"
+        "        f.write(b'x' * 750)"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 2
+    assert [o.filename for o in response.outputs] == ["a.bin", "b.bin"]
+    assert len(response.dropped_outputs) == 1
+    assert response.dropped_outputs[0].type == "file"
+    assert response.dropped_outputs[0].filename == "c.bin"
+    assert response.dropped_outputs[0].reason == "total_cap"
+
+
+async def test_per_output_cap_drops_do_not_consume_total_budget(session_runtime_factory):
+    """A per_output_cap drop must NOT increment total_bytes; the next output that fits both caps is accepted."""
+    # 5000 raw bytes -> 6668 base64 chars (exceeds per-file cap of 3000)
+    # 1000 raw bytes -> 1336 base64 chars (fits per-file and, with total_bytes still at 0, fits total too)
+    # If the bug existed (per_output drop incremented total), 6668 + 1336 = 8004 > 5000 would drop file b.bin too.
+    runtime = await session_runtime_factory(
+        file_max_bytes=3000,
+        total_max_bytes=5000,
+    )
+
+    response = await runtime.execute(
+        "with open('/workspace/outputs/a.bin', 'wb') as f:\n"
+        "    f.write(b'x' * 5000)\n"
+        "with open('/workspace/outputs/b.bin', 'wb') as f:\n"
+        "    f.write(b'x' * 1000)"
+    )
+
+    assert response.exit_code == 0
+    assert len(response.outputs) == 1
+    assert response.outputs[0].filename == "b.bin"
+    assert len(response.dropped_outputs) == 1
+    assert response.dropped_outputs[0].filename == "a.bin"
+    assert response.dropped_outputs[0].reason == "per_output_cap"

@@ -46,6 +46,7 @@ class SessionRuntime:
         dataframe_max_bytes: int = 1 * 1024 * 1024,
         file_max_bytes: int = 5 * 1024 * 1024,
         file_max_count: int = 10,
+        total_max_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         self._image_tag = image_tag
         self._timeout_seconds = timeout_seconds
@@ -53,6 +54,7 @@ class SessionRuntime:
         self._dataframe_max_bytes = dataframe_max_bytes
         self._file_max_bytes = file_max_bytes
         self._file_max_count = file_max_count
+        self._total_max_bytes = total_max_bytes
         self._proc: asyncio.subprocess.Process | None = None
         self._container_name: str | None = None
         self._stderr_buf = bytearray()
@@ -68,6 +70,7 @@ class SessionRuntime:
         dataframe_max_bytes: int = 1 * 1024 * 1024,
         file_max_bytes: int = 5 * 1024 * 1024,
         file_max_count: int = 10,
+        total_max_bytes: int = 10 * 1024 * 1024,
     ) -> SessionRuntime:
         """Spawn the container, attach pipes, return ready-to-use runtime."""
         runtime = cls(
@@ -77,6 +80,7 @@ class SessionRuntime:
             dataframe_max_bytes=dataframe_max_bytes,
             file_max_bytes=file_max_bytes,
             file_max_count=file_max_count,
+            total_max_bytes=total_max_bytes,
         )
         runtime._container_name = f"kestrel-session-{uuid.uuid4().hex}"
 
@@ -173,6 +177,7 @@ class SessionRuntime:
         raw_outputs = data.get("outputs", [])
         outputs: list = []
         dropped: list[DroppedOutput] = []
+        total_bytes = 0
         for raw in raw_outputs:
             if raw.get("type") == "plot":
                 size_bytes = len(raw.get("data", ""))
@@ -182,8 +187,15 @@ class SessionRuntime:
                         reason="per_output_cap",
                         size_bytes=size_bytes,
                     ))
+                elif total_bytes + size_bytes > self._total_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="plot",
+                        reason="total_cap",
+                        size_bytes=size_bytes,
+                    ))
                 else:
                     outputs.append(PlotOutput(data=raw["data"]))
+                    total_bytes += size_bytes
             elif raw.get("type") == "dataframe":
                 payload_size = len(json.dumps(raw.get("data", {})))
                 if payload_size > self._dataframe_max_bytes:
@@ -192,11 +204,18 @@ class SessionRuntime:
                         reason="per_output_cap",
                         size_bytes=payload_size,
                     ))
+                elif total_bytes + payload_size > self._total_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="dataframe",
+                        reason="total_cap",
+                        size_bytes=payload_size,
+                    ))
                 else:
                     outputs.append(DataFrameOutput(
                         data=raw["data"],
                         shape=tuple(raw.get("shape", [0, 0])),
                     ))
+                    total_bytes += payload_size
             elif raw.get("type") == "file":
                 file_count = sum(1 for o in outputs if isinstance(o, FileOutput))
                 size_bytes = len(raw.get("data", ""))
@@ -215,12 +234,20 @@ class SessionRuntime:
                         size_bytes=size_bytes,
                         filename=filename,
                     ))
+                elif total_bytes + size_bytes > self._total_max_bytes:
+                    dropped.append(DroppedOutput(
+                        type="file",
+                        reason="total_cap",
+                        size_bytes=size_bytes,
+                        filename=filename,
+                    ))
                 else:
                     outputs.append(FileOutput(
                         mime_type=raw.get("mime_type", "application/octet-stream"),
                         filename=filename,
                         data=raw["data"],
                     ))
+                    total_bytes += size_bytes
         return SessionExecuteResponse(
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),

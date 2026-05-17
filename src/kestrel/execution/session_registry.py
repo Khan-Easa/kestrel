@@ -113,6 +113,7 @@ class InMemorySessionRegistry:
                 dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
                 file_max_bytes=self._settings.rich_output_file_max_bytes,
                 file_max_count=self._settings.rich_output_file_max_count,
+                total_max_bytes=self._settings.rich_output_total_max_bytes,
             )
             from_pool = False
 
@@ -257,6 +258,7 @@ class InMemorySessionRegistry:
                 dataframe_max_bytes=self._settings.rich_output_dataframe_max_bytes,
                 file_max_bytes=self._settings.rich_output_file_max_bytes,
                 file_max_count=self._settings.rich_output_file_max_count,
+                total_max_bytes=self._settings.rich_output_total_max_bytes,
             )
         except Exception:
             _logger.exception("pool_refill_failed")
