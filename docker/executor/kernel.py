@@ -44,21 +44,68 @@ def _ensure_outputs_dir() -> None:
 
 
 def _emit(response: dict) -> None:
-    """Write one JSON-line response to stdout and flush."""
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
+    """Write one JSON-line response to the real stdout and flush.
+
+    Uses sys.__stdout__ (the preserved reference to the original interpreter
+    stdout) rather than sys.stdout, because during _execute the latter is
+    redirected to a _StreamingWriter — writing chunk lines through that would
+    recurse into the writer's own write() method.
+    """
+    sys.__stdout__.write(json.dumps(response) + "\n")
+    sys.__stdout__.flush()
 
 
-def _execute(code: str, namespace: dict) -> tuple[str, str, int, object]:
+class _StreamingWriter(io.TextIOBase):
+    """File-like object that emits one chunk JSON line per write() and buffers locally.
+
+    Substep 2 streaming protocol: replaces io.StringIO() in _execute. Each
+    write() call emits {"id": msg_id, "type": chunk_type, "data": s} via
+    _emit, AND appends s to a local StringIO so the final "result" message
+    can carry the coalesced stdout/stderr the way the pre-streaming protocol
+    did. Streaming consumers read chunks as they arrive; non-streaming
+    consumers ignore chunks and read result.stdout/stderr at the end.
+
+    chunk_type is "stdout_chunk" or "stderr_chunk"; constructed twice per
+    _execute (once per channel).
+    """
+
+    def __init__(self, msg_id: object, chunk_type: str) -> None:
+        super().__init__()
+        self._msg_id = msg_id
+        self._chunk_type = chunk_type
+        self._buf = io.StringIO()
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buf.write(s)
+        _emit({
+            "id": self._msg_id,
+            "type": self._chunk_type,
+            "data": s,
+        })
+        return len(s)
+
+    def getvalue(self) -> str:
+        return self._buf.getvalue()
+
+def _execute(code: str, namespace: dict, msg_id: object) -> tuple[str, str, int, object]:
     """Run user code; return (stdout, stderr, exit_code, captured_value).
 
     Uses Jupyter-style AST splitting: if the last statement is a bare
     expression, eval it separately and return its value for type dispatch.
     Otherwise captured_value is None. Catches Exception only —
     SystemExit/KeyboardInterrupt propagate and end the kernel.
+
+    Substep 2: stdout/stderr capture uses _StreamingWriter (not io.StringIO),
+    which emits one chunk line per write() while also buffering locally —
+    msg_id is threaded through so chunk lines carry the right correlation id.
     """
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
+    stdout_buf = _StreamingWriter(msg_id, "stdout_chunk")
+    stderr_buf = _StreamingWriter(msg_id, "stderr_chunk")
     exit_code = 0
     captured_value: object = None
 
@@ -194,7 +241,7 @@ def main() -> int:
         msg_id = msg.get("id")
         code = msg.get("code", "")
 
-        stdout, stderr, exit_code, captured_value = _execute(code, namespace)
+        stdout, stderr, exit_code, captured_value = _execute(code, namespace, msg_id)
         outputs = _capture_plots()
         df_output = _capture_dataframe(captured_value)
         if df_output is not None:
@@ -203,6 +250,7 @@ def main() -> int:
 
         _emit({
             "id": msg_id,
+            "type": "result",
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,

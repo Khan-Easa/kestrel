@@ -144,34 +144,64 @@ class SessionRuntime:
             self._terminated = True
             raise SessionTerminated(f"kernel stdin closed: {exc}") from exc
 
-        try:
-            line = await asyncio.wait_for(
-                self._proc.stdout.readline(),
-                timeout=self._timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            self._terminated = True
-            await _docker_kill(self._container_name)
-            await self._proc.wait()
-            raise SessionTimeout(
-                f"no reply within {self._timeout_seconds}s; container killed"
-            )
+        # Substep 2 streaming protocol: kernel emits zero or more
+        # stdout_chunk/stderr_chunk lines, terminated by a result line.
+        # Non-streaming consumers (this method) skip chunks and use the
+        # coalesced stdout/stderr fields on the result message. The deadline
+        # below is per-execute total wall-clock, matching the pre-streaming
+        # contract — a slow execute that emits frequent chunks does not get
+        # to run forever.
+        deadline = time.perf_counter() + self._timeout_seconds
+        data: dict | None = None
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                self._terminated = True
+                await _docker_kill(self._container_name)
+                await self._proc.wait()
+                raise SessionTimeout(
+                    f"no result within {self._timeout_seconds}s; container killed"
+                )
 
-        if not line:
-            self._terminated = True
-            await self._proc.wait()
-            raise SessionTerminated("kernel exited before sending a reply")
+            try:
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                self._terminated = True
+                await _docker_kill(self._container_name)
+                await self._proc.wait()
+                raise SessionTimeout(
+                    f"no result within {self._timeout_seconds}s; container killed"
+                )
 
-        try:
-            data = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SessionProtocolError(f"malformed reply: {exc}") from exc
+            if not line:
+                self._terminated = True
+                await self._proc.wait()
+                raise SessionTerminated("kernel exited before sending a result")
 
-        if data.get("id") != msg_id:
-            raise SessionProtocolError(
-                f"reply id mismatch: sent {msg_id}, got {data.get('id')!r}"
-            )
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SessionProtocolError(f"malformed reply: {exc}") from exc
 
+            if msg.get("id") != msg_id:
+                raise SessionProtocolError(
+                    f"reply id mismatch: sent {msg_id}, got {msg.get('id')!r}"
+                )
+
+            # Default to "result" when the type field is absent, for
+            # rollback compatibility with a pre-:0.5.0 kernel that still
+            # emits the single-line response.
+            msg_type = msg.get("type", "result")
+            if msg_type == "result":
+                data = msg
+                break
+            # Unknown types (including stdout_chunk / stderr_chunk) are
+            # silently consumed — chunks are for streaming consumers, not us.
+
+        assert data is not None
         duration_ms = int((time.perf_counter() - start) * 1000)
 
         raw_outputs = data.get("outputs", [])
