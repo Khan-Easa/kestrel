@@ -7,6 +7,8 @@ import uuid
 
 import structlog
 
+from collections.abc import AsyncIterator
+
 from kestrel.api.schemas import (
     DataFrameOutput,
     DroppedOutput,
@@ -14,6 +16,10 @@ from kestrel.api.schemas import (
     FileOutput,
     PlotOutput,
     SessionExecuteResponse,
+    StreamMessage,
+    StreamResult,
+    StreamStderrChunk,
+    StreamStdoutChunk,
 )
 
 _STDERR_CAP_BYTES = 64 * 1024
@@ -204,7 +210,124 @@ class SessionRuntime:
         assert data is not None
         duration_ms = int((time.perf_counter() - start) * 1000)
 
-        raw_outputs = data.get("outputs", [])
+        outputs, dropped = self._parse_outputs(data.get("outputs", []))
+        return SessionExecuteResponse(
+            stdout=data.get("stdout", ""),
+            stderr=data.get("stderr", ""),
+            exit_code=int(data.get("exit_code", 0)),
+            duration_ms=duration_ms,
+            timed_out=False,
+            stdout_truncated=False,
+            stderr_truncated=False,
+            outputs=outputs,
+            dropped_outputs=dropped,
+        )
+    
+    async def execute_stream(self, code: str) -> AsyncIterator[StreamMessage]:
+        """Phase 6 substep 4: streaming variant of execute().
+
+        Async generator that yields StreamStdoutChunk / StreamStderrChunk
+        per kernel chunk as it arrives, then a final StreamResult after
+        the kernel's terminator. Translates the kernel's internal protocol
+        (stdout_chunk / stderr_chunk / result) to the external wire format
+        (stdout / stderr / result) inline — kernel chunk-type names are
+        implementation detail.
+
+        Same error semantics as execute(): SessionTerminated if the session
+        is already dead, SessionTimeout if no result within timeout_seconds
+        (and kills the container as a side effect), SessionProtocolError if
+        a reply is malformed. The route layer catches these and maps to
+        WebSocket close codes.
+        """
+        if self._terminated:
+            raise SessionTerminated("session is no longer running")
+
+        assert self._proc is not None and self._proc.stdin is not None
+        assert self._proc.stdout is not None
+
+        msg_id = uuid.uuid4().hex
+        request = json.dumps({"id": msg_id, "code": code}) + "\n"
+        start = time.perf_counter()
+
+        try:
+            self._proc.stdin.write(request.encode("utf-8"))
+            await self._proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            self._terminated = True
+            raise SessionTerminated(f"kernel stdin closed: {exc}") from exc
+
+        deadline = time.perf_counter() + self._timeout_seconds
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                self._terminated = True
+                await _docker_kill(self._container_name)
+                await self._proc.wait()
+                raise SessionTimeout(
+                    f"no result within {self._timeout_seconds}s; container killed"
+                )
+
+            try:
+                line = await asyncio.wait_for(
+                    self._proc.stdout.readline(),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                self._terminated = True
+                self._terminated = True
+                await _docker_kill(self._container_name)
+                await self._proc.wait()
+                raise SessionTimeout(
+                    f"no result within {self._timeout_seconds}s; container killed"
+                )
+
+            if not line:
+                self._terminated = True
+                await self._proc.wait()
+                raise SessionTerminated("kernel exited before sending a result")
+
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SessionProtocolError(f"malformed reply: {exc}") from exc
+
+            if msg.get("id") != msg_id:
+                raise SessionProtocolError(
+                    f"reply id mismatch: sent {msg_id}, got {msg.get('id')!r}"
+                )
+
+            msg_type = msg.get("type", "result")
+            if msg_type == "stdout_chunk":
+                yield StreamStdoutChunk(data=msg.get("data", ""))
+            elif msg_type == "stderr_chunk":
+                yield StreamStderrChunk(data=msg.get("data", ""))
+            elif msg_type == "result":
+                outputs, dropped = self._parse_outputs(msg.get("outputs", []))
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                yield StreamResult(
+                    stdout=msg.get("stdout", ""),
+                    stderr=msg.get("stderr", ""),
+                    exit_code=int(msg.get("exit_code", 0)),
+                    duration_ms=duration_ms,
+                    timed_out=False,
+                    stdout_truncated=False,
+                    stderr_truncated=False,
+                    outputs=outputs,
+                    dropped_outputs=dropped,
+                )
+                return
+            # Unknown types silently consumed — same forward-compat policy
+            # as execute().
+    
+    def _parse_outputs(self, raw_outputs: list[dict]) -> tuple[list, list[DroppedOutput]]:
+        """Parse the kernel's outputs[] list and apply per-output + total caps.
+
+        Extracted in Phase 6 substep 4 so execute() and execute_stream() can
+        share the dispatch + cap logic. Returns (accepted_outputs, dropped).
+        Branch ordering is load-bearing (per-output cap → file-count cap →
+        total cap → accept) so per-output drops don't consume total budget —
+        the invariant tested by test_per_output_cap_drops_do_not_consume_total_budget.
+        """
         outputs: list = []
         dropped: list[DroppedOutput] = []
         total_bytes = 0
@@ -278,17 +401,7 @@ class SessionRuntime:
                         data=raw["data"],
                     ))
                     total_bytes += size_bytes
-        return SessionExecuteResponse(
-            stdout=data.get("stdout", ""),
-            stderr=data.get("stderr", ""),
-            exit_code=int(data.get("exit_code", 0)),
-            duration_ms=duration_ms,
-            timed_out=False,
-            stdout_truncated=False,
-            stderr_truncated=False,
-            outputs=outputs,
-            dropped_outputs=dropped,
-        )
+        return outputs, dropped
     
     async def close(self) -> None:
         """Tear down the container and reap the subprocess.
