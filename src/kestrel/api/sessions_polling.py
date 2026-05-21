@@ -1,0 +1,184 @@
+"""Phase 6 substep 6: HTTP polling fallback for streaming session executes.
+
+The WebSocket route (``sessions_stream.py``) is the primary streaming
+transport. Some clients can't use it — corporate proxies routinely block the
+WebSocket upgrade handshake. This module is the fallback: the same streamed
+output, delivered over plain HTTP request/response.
+
+Two endpoints (Decision 6.6-shape):
+
+* ``POST /sessions/{id}/execute/polling`` starts an execute on a background
+task and returns ``{execution_id}`` immediately — fire-and-forget.
+* ``GET  /sessions/{id}/executions/{execution_id}?since=&wait=`` reads the
+next batch of stream messages from the per-execution buffer, long-polling
+up to ``wait`` seconds for new output (Decision 6.6-mech).
+
+Why its own file (not ``sessions.py`` or ``sessions_stream.py``): Decision
+6.6-loc. ``sessions.py`` holds synchronous request/response routes;
+``sessions_stream.py`` holds the WebSocket lifecycle; this holds the
+async-execute-plus-cursor-read lifecycle — three different mental models.
+
+The buffer itself lives on the registry (``registry._polling_buffers``,
+Decision 6.6-buffer); this module is the only code that reads and writes it.
+"""
+from __future__ import annotations
+
+import asyncio
+import uuid
+
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from kestrel.api.auth import require_api_key
+from kestrel.api.schemas import (
+    ExecuteRequest,
+    PollingExecuteResponse,
+    PollingReadResponse,
+    StreamError,
+)
+from kestrel.api.sessions import get_session_registry
+from kestrel.config import Settings, get_settings
+from kestrel.execution.session_registry import (
+    PollingBuffer,
+    RegistryUnavailable,
+    SessionBusy,
+    SessionNotFound,
+    SessionRegistry,
+)
+from kestrel.execution.session_runtime import (
+    SessionProtocolError,
+    SessionTerminated,
+    SessionTimeout,
+)
+
+logger = structlog.get_logger()
+
+router = APIRouter(
+    prefix="/sessions",
+    tags=["sessions-polling"],
+    dependencies=[Depends(require_api_key)],
+)
+
+
+async def _run_polling_execute(
+    registry: SessionRegistry,
+    session_id: str,
+    code: str,
+    buffer: PollingBuffer,
+) -> None:
+    """Background orchestrator — wraps ``execute_stream`` for the polling path.
+
+    Decision 6.6-wrap: the polling routes don't call ``execute_stream``
+    directly. This task does — it acquires the session lock, iterates the
+    streaming runtime, and appends each StreamMessage to ``buffer``. Every
+    execute-time failure is converted into a terminal ``StreamError`` message
+    in the buffer rather than an exception nobody can catch (the POST handler
+    that spawned this task has long since returned). ``mark_done`` always
+    runs, so a polling client's ``done`` flag is guaranteed to flip.
+    """
+    try:
+        async with registry.acquire_for_execute(session_id) as runtime:
+            async for message in runtime.execute_stream(code):
+                await buffer.append(message)
+    except SessionBusy:
+        await buffer.append(
+            StreamError(code="session_busy", detail="another execute is in progress")
+        )
+    except SessionNotFound:
+        await buffer.append(
+            StreamError(code="session_not_found", detail="session not found")
+        )
+    except SessionTimeout:
+        logger.info("polling_execute_timeout", session_id_prefix=session_id[:8])
+        await buffer.append(
+            StreamError(code="session_timeout", detail="execution exceeded the time limit")
+        )
+    except SessionTerminated:
+        await buffer.append(
+            StreamError(code="session_terminated", detail="session is no longer running")
+        )
+    except SessionProtocolError:
+        logger.exception("polling_execute_protocol_error", session_id_prefix=session_id[:8])
+        await buffer.append(
+            StreamError(code="protocol_error", detail="internal protocol error")
+        )
+    except RegistryUnavailable:
+        logger.warning("polling_execute_registry_unavailable", session_id_prefix=session_id[:8])
+        await buffer.append(
+            StreamError(code="registry_unavailable", detail="session store unavailable")
+        )
+    except Exception:
+        logger.exception("polling_execute_failed", session_id_prefix=session_id[:8])
+        await buffer.append(StreamError(code="internal", detail="internal error"))
+    finally:
+        await buffer.mark_done()
+
+
+@router.post(
+    "/{session_id}/execute/polling",
+    response_model=PollingExecuteResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_polling_execute(
+    session_id: str,
+    req: ExecuteRequest,
+    registry: SessionRegistry = Depends(get_session_registry),
+) -> PollingExecuteResponse:
+    """Start an execute on a background task; return its execution_id at once.
+
+    Validates only that the session exists (404 via the SessionNotFound
+    handler). Busy / timeout / terminated outcomes can't be known yet — the
+    execute hasn't run — so they surface later as a StreamError in the buffer,
+    read via the GET endpoint.
+    """
+    await registry.get_info(session_id)  # raises SessionNotFound -> HTTP 404
+
+    execution_id = uuid.uuid4().hex
+    buffer = PollingBuffer()
+    registry._polling_buffers.setdefault(session_id, {})[execution_id] = buffer
+    buffer.task = asyncio.create_task(
+        _run_polling_execute(registry, session_id, req.code, buffer)
+    )
+    logger.info(
+        "polling_execute_started",
+        session_id_prefix=session_id[:8],
+        execution_id_prefix=execution_id[:8],
+        code_length=len(req.code),
+    )
+    return PollingExecuteResponse(execution_id=execution_id)
+
+
+@router.get(
+    "/{session_id}/executions/{execution_id}",
+    response_model=PollingReadResponse,
+)
+async def read_polling_execute(
+    session_id: str,
+    execution_id: str,
+    registry: SessionRegistry = Depends(get_session_registry),
+    settings: Settings = Depends(get_settings),
+    since: int = Query(default=0, ge=0, description="Cursor: return messages with index >= this."),
+    wait: float = Query(default=0.0, ge=0.0, description="Long-poll: hold the request up to this many seconds for new output. 0 = return immediately."),
+) -> PollingReadResponse:
+    """Read the next batch of stream messages from an execution's buffer.
+
+    Long-polls up to ``min(wait, polling_max_wait_seconds)`` for output past
+    ``since`` to appear. Returns 404 if the execution buffer is unknown
+    (never started, or already TTL-evicted / session-deleted).
+    """
+    by_execution = registry._polling_buffers.get(session_id)
+    buffer = by_execution.get(execution_id) if by_execution else None
+    if buffer is None:
+        raise HTTPException(status_code=404, detail="execution not found")
+
+    capped_wait = min(wait, settings.polling_max_wait_seconds)
+    await buffer.wait_for_messages(since, capped_wait)
+
+    new_messages = buffer.messages[since:]
+    next_cursor = since + len(new_messages)
+    done = buffer.done and next_cursor >= len(buffer.messages)
+    return PollingReadResponse(
+        messages=new_messages,
+        next_cursor=next_cursor,
+        done=done,
+    )

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from kestrel.api.routes import router
 from kestrel.api.sessions import router as sessions_router
 from kestrel.api.sessions_stream import router as sessions_stream_router
+from kestrel.api.sessions_polling import router as sessions_polling_router
 from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
     app.include_router(sessions_router)
     app.include_router(sessions_stream_router)
+    app.include_router(sessions_polling_router)
 
     @app.exception_handler(SessionNotFound)
     async def _session_not_found(request: Request, exc: SessionNotFound) -> JSONResponse:

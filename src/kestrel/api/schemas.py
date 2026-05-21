@@ -89,4 +89,15 @@ class StreamError(BaseModel):
     detail: str = Field(description="Phase 6: human-readable error message; not stable enough for clients to switch on.")
 
 
-StreamMessage = Annotated[ StreamStdoutChunk | StreamStderrChunk | StreamHeartbeat | StreamResult | StreamError, Field(discriminator="type"), ]
+StreamMessage = Annotated[ StreamStdoutChunk | StreamStderrChunk | StreamHeartbeat | StreamResult | StreamError,
+Field(discriminator="type"), ]
+
+
+class PollingExecuteResponse(BaseModel):
+    execution_id: str = Field(description="Phase 6 substep 6: opaque handle for the async polling execute just started. Pass it to GET /sessions/{id}/executions/{execution_id} to read output as it accumulates.")
+
+
+class PollingReadResponse(BaseModel):
+    messages: list[StreamMessage] = Field(default_factory=list, description="Phase 6 substep 6: stream messages with index >= the requested ?since cursor. Same discriminated-union shape the WebSocket route sends.")
+    next_cursor: int = Field(ge=0, description="Phase 6 substep 6: cursor to pass as ?since on the next poll. Equals the requested since plus len(messages).")
+    done: bool = Field(description="Phase 6 substep 6: True once the execute has finished AND every message up to it has been delivered in this or an earlier poll. When True, the client stops polling.")

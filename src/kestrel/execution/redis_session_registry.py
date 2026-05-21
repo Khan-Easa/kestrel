@@ -15,11 +15,14 @@ from redis.exceptions import RedisError
 
 from kestrel.config import Settings
 from kestrel.execution.session_registry import (
+    PollingBuffer,
     RegistryUnavailable,
     SessionBusy,
     SessionInfo,
     SessionNotFound,
     _Entry,
+    _drain_polling_buffers,
+    _evict_expired_polling_buffers,
     _utcnow,
 )
 from kestrel.execution.session_runtime import SessionRuntime
@@ -94,6 +97,7 @@ class RedisSessionRegistry:
         self._closed = False
         self._pool: list[SessionRuntime] = []
         self._refill_tasks: set[asyncio.Task[None]] = set()
+        self._polling_buffers: dict[str, dict[str, PollingBuffer]] = {}
         # TTL backstop: comfortably longer than the idle timeout so a live but
         # idle session is never dropped from Redis before the sweeper evicts it.
         self._redis_ttl_seconds = max(
@@ -255,6 +259,7 @@ class RedisSessionRegistry:
         if not existed:
             raise SessionNotFound(session_id)
 
+        self._polling_buffers.pop(session_id, None)
         entry = self._sessions.pop(session_id, None)
         if entry is not None:
             await entry.runtime.close()
@@ -329,6 +334,7 @@ class RedisSessionRegistry:
         runtimes = [e.runtime for e in self._sessions.values()] + list(self._pool)
         self._sessions.clear()
         self._pool.clear()
+        _drain_polling_buffers(self._polling_buffers)
         if runtimes:
             await asyncio.gather(
                 *(rt.close() for rt in runtimes), return_exceptions=True
@@ -406,8 +412,12 @@ class RedisSessionRegistry:
         close the container *and* remove its Redis directory entry.
 
         Best-effort: a Redis hiccup logs and ends the pass rather than killing
-        the background task.
+        the background task. Polling-buffer TTL eviction runs first, before
+        any Redis-dependent early return, so it happens regardless of Redis.
         """
+        _evict_expired_polling_buffers(
+            self._polling_buffers, self._settings.polling_buffer_ttl_seconds
+        )
         if self._client is None:
             return
         local = list(self._sessions.items())

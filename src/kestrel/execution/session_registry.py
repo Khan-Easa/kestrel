@@ -50,6 +50,94 @@ class _Entry:
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
+
+@dataclass(slots=True)
+class PollingBuffer:
+    """Append-only message buffer for one polling execute (Phase 6 substep 6).
+
+    The polling POST handler creates one per execute; the polling orchestrator
+    feeds it one entry per StreamMessage from execute_stream; long-poll GET
+    handlers drain it from a caller-supplied cursor. The registry owns its
+    lifecycle (TTL eviction in the sweep, bulk removal on session delete) but
+    treats the messages as opaque objects — it never imports the api-layer
+    StreamMessage type. See Decision 6.6-buffer.
+
+    Cursor model (Decision 6.6-cursor): ``messages`` is append-only, the cursor
+    is an integer index, a GET with ``since=N`` returns ``messages[N:]``.
+    """
+
+    messages: list = field(default_factory=list, repr=False)
+    done: bool = False
+    completed_at: datetime | None = None
+    task: asyncio.Task[None] | None = None
+    _cond: asyncio.Condition = field(default_factory=asyncio.Condition, repr=False)
+
+    async def append(self, message: object) -> None:
+        """Append one message and wake every waiting long-poll GET."""
+        async with self._cond:
+            self.messages.append(message)
+            self._cond.notify_all()
+
+    async def mark_done(self) -> None:
+        """Flag the execute finished, stamp completion time, wake all GETs."""
+        async with self._cond:
+            self.done = True
+            self.completed_at = _utcnow()
+            self._cond.notify_all()
+
+    async def wait_for_messages(self, since: int, timeout: float) -> None:
+        """Block up to ``timeout`` s until ``messages[since:]`` is non-empty or
+        the execute is done. Returns at once if either already holds or
+        ``timeout <= 0`` (the short-poll degenerate case, Decision 6.6-mech)."""
+        if timeout <= 0:
+            return
+        async with self._cond:
+            try:
+                await asyncio.wait_for(
+                    self._cond.wait_for(
+                        lambda: len(self.messages) > since or self.done
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                pass
+
+
+def _evict_expired_polling_buffers(
+    polling_buffers: dict[str, dict[str, PollingBuffer]],
+    ttl_seconds: float,
+) -> None:
+    """Drop polling buffers whose execute completed more than ``ttl_seconds``
+    ago (Decision 6.6-evict). Mutates ``polling_buffers`` in place; also drops
+    a session's now-empty sub-dict. Shared by both registry backends' sweep
+    passes — the polling buffer is purely in-process, identical logic
+    regardless of session backend.
+    """
+    now = _utcnow()
+    for session_id, by_execution in list(polling_buffers.items()):
+        for execution_id, buffer in list(by_execution.items()):
+            if (
+                buffer.completed_at is not None
+                and (now - buffer.completed_at).total_seconds() > ttl_seconds
+            ):
+                by_execution.pop(execution_id, None)
+        if not by_execution:
+            polling_buffers.pop(session_id, None)
+
+
+def _drain_polling_buffers(
+    polling_buffers: dict[str, dict[str, PollingBuffer]],
+) -> None:
+    """Cancel every in-flight polling orchestrator task and clear the buffer
+    map. Called from a registry's ``aclose`` so shutdown leaves no pending
+    tasks behind."""
+    for by_execution in polling_buffers.values():
+        for buffer in by_execution.values():
+            if buffer.task is not None and not buffer.task.done():
+                buffer.task.cancel()
+    polling_buffers.clear()
+
+
 @runtime_checkable
 class SessionRegistry(Protocol):
     """Structural interface every session-registry backend satisfies.
@@ -72,6 +160,13 @@ class SessionRegistry(Protocol):
     async def start(self) -> None: ...
     async def aclose(self) -> None: ...
 
+    # Phase 6 substep 6 — per-execution polling buffers (Decision 6.6-buffer):
+    # {session_id: {execution_id: PollingBuffer}}. In-process per worker
+    # (Decision 6.6-sticky); the polling routes in sessions_polling.py read
+    # and write it directly. Both backends initialise it to {} and clean it
+    # up in delete(), the sweep, and aclose().
+    _polling_buffers: dict[str, dict[str, PollingBuffer]]
+
 class InMemorySessionRegistry:
     """In-memory map of session_id → SessionRuntime, with background idle eviction.
 
@@ -93,6 +188,7 @@ class InMemorySessionRegistry:
         self._closed = False
         self._pool: list[SessionRuntime] = []
         self._refill_tasks: set[asyncio.Task[None]] = set()
+        self._polling_buffers: dict[str, dict[str, PollingBuffer]] = {}
 
     # ──────────────────── public API ────────────────────
 
@@ -173,6 +269,7 @@ class InMemorySessionRegistry:
         entry = self._sessions.pop(session_id, None)
         if entry is None:
             raise SessionNotFound(session_id)
+        self._polling_buffers.pop(session_id, None)
         await entry.runtime.close()
         _logger.info(
             "session_deleted",
@@ -222,6 +319,7 @@ class InMemorySessionRegistry:
         )
         self._sessions.clear()
         self._pool.clear()
+        _drain_polling_buffers(self._polling_buffers)
         if runtimes:
             await asyncio.gather(
                 *(rt.close() for rt in runtimes),
@@ -284,7 +382,11 @@ class InMemorySessionRegistry:
             return
 
     async def _sweep_once(self, timeout_seconds: float) -> None:
-        """One eviction pass: snapshot the dict, close entries idle past the threshold."""
+        """One eviction pass: snapshot the dict, close entries idle past the
+        threshold, then drop polling buffers past their post-completion TTL."""
+        _evict_expired_polling_buffers(
+            self._polling_buffers, self._settings.polling_buffer_ttl_seconds
+        )
         now = _utcnow()
         expired: list[tuple[str, SessionRuntime]] = []
         for session_id, entry in list(self._sessions.items()):
