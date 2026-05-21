@@ -215,6 +215,7 @@ async def execute_in_session_stream(
     try:
         try:
             async with registry.acquire_for_execute(session_id) as runtime:
+                execute_completed = False
                 try:
                     async for message in runtime.execute_stream(execute_request.code):
                         if disconnect_task.done():
@@ -222,7 +223,6 @@ async def execute_in_session_stream(
                                 "session_stream_client_disconnect_mid_execute",
                                 session_id_prefix=session_id[:8],
                             )
-                            await runtime.close()
                             return
 
                         async with send_lock:
@@ -242,7 +242,6 @@ async def execute_in_session_stream(
                                     session_id_prefix=session_id[:8],
                                     timeout_seconds=backpressure_timeout,
                                 )
-                                await runtime.close()
                                 await _safe_close(websocket, 1011, "backpressure_timeout")
                                 return
 
@@ -252,15 +251,21 @@ async def execute_in_session_stream(
                                     "session_stream_client_disconnect_mid_execute",
                                     session_id_prefix=session_id[:8],
                                 )
-                                await runtime.close()
                                 return
 
                             # send_task completed — propagate any exception it raised.
                             send_task.result()
 
-                        # Reset heartbeat AFTER successful send (outside the lock
+                         # Reset heartbeat AFTER successful send (outside the lock
                         # so the heartbeat task can promptly observe the reset).
                         heartbeat_reset.set()
+                    execute_completed = True
+                except WebSocketDisconnect:
+                    logger.info(
+                        "session_stream_client_disconnect_mid_execute",
+                        session_id_prefix=session_id[:8],
+                    )
+                    return
                 except SessionTimeout:
                     logger.info(
                         "session_stream_timeout",
@@ -278,6 +283,16 @@ async def execute_in_session_stream(
                     )
                     await _safe_close(websocket, 1011, "protocol_error")
                     return
+                finally:
+                    # Decision 6-disconnect: any abnormal exit from the execute
+                    # loop — client disconnect, send failure, backpressure,
+                    # timeout, protocol error — must kill the kernel. An
+                    # abandoned mid-execute kernel keeps running and leaves a
+                    # stale reply in the stdout pipe that poisons the next
+                    # execute on the session. Normal completion skips this so
+                    # the session stays alive for reuse. close() is idempotent.
+                    if not execute_completed:
+                        await runtime.close()
         except SessionBusy:
             await websocket.send_json(
                 StreamError(code="session_busy", detail="another execute is in progress").model_dump()
