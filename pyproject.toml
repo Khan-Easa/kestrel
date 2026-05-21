@@ -34,3 +34,13 @@ packages = ["src/kestrel"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Phase 6 substep 7: silence the benign PytestUnraisableExceptionWarning from
+# asyncio's BaseSubprocessTransport.__del__. Its finalizer runs after
+# pytest-asyncio has closed the per-test event loop and fails a loop-bound
+# pipe cleanup ("Event loop is closed"). All docker/subprocess children are
+# explicitly awaited (proc.wait()) and the OS closes their FDs on exit, so
+# nothing leaks — only the late finalizer is noisy. Kestrel defines no
+# __del__/finalizers of its own, so this category is unambiguous here.
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
