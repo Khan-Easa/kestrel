@@ -20,6 +20,7 @@ import asyncio
 import json
 import secrets
 import time
+import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -122,6 +123,13 @@ async def execute_in_session_stream(
     if not _auth_ok(token, settings.dev_api_key):
         await _safe_close(websocket, 4401, "auth_failed")
         return
+    
+    request_id = websocket.headers.get("x-request-id") or str(uuid.uuid4())
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        request_id=request_id,
+        path=f"/sessions/{session_id}/execute/stream",
+    )
 
     try:
         await registry.get_info(session_id)
@@ -148,7 +156,11 @@ async def execute_in_session_stream(
             execute_request = ExecuteRequest(**payload)
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             await websocket.send_json(
-                StreamError(code="bad_request", detail=f"invalid execute request: {exc}").model_dump()
+                StreamError(
+                    code="bad_request",
+                    detail=f"invalid execute request: {exc}",
+                    request_id=request_id,
+                ).model_dump()
             )
             await _safe_close(websocket, 1011, "bad_request")
             return
@@ -230,6 +242,8 @@ async def execute_in_session_stream(
                                     session_id_prefix=session_id[:8],
                                 )
                                 return
+                            if isinstance(message, (StreamResult, StreamError)):
+                                message = message.model_copy(update={"request_id": request_id})
                             if isinstance(message, StreamResult):
                                 final_result = message
 
@@ -318,7 +332,11 @@ async def execute_in_session_stream(
                             await runtime.close()
             except SessionBusy:
                 await websocket.send_json(
-                    StreamError(code="session_busy", detail="another execute is in progress").model_dump()
+                    StreamError(
+                        code="session_busy",
+                        detail="another execute is in progress",
+                        request_id=request_id,
+                    ).model_dump()
                 )
                 await _safe_close(websocket, 4409, "session_busy")
                 return

@@ -81,12 +81,28 @@ class StreamHeartbeat(BaseModel):
 
 class StreamResult(SessionExecuteResponse):
     type: Literal["result"] = "result"
+    request_id: str = Field(
+        default="",
+        description=(
+            "Phase 7 substep 1 (7-reqid-stream): X-Request-ID of the originating "
+            "HTTP request — handshake for WebSocket, POST for polling. Stamped by "
+            "the API layer immediately before send/buffer; empty when the runtime "
+            "constructs the message in-process."
+        ),
+    )
 
 
 class StreamError(BaseModel):
     type: Literal["error"] = "error"
     code: str = Field(description="Phase 6: short stable error code, e.g. session_not_found, session_busy, session_terminated, internal.")
     detail: str = Field(description="Phase 6: human-readable error message; not stable enough for clients to switch on.")
+    request_id: str = Field(
+        default="",
+        description=(
+            "Phase 7 substep 1 (7-reqid-stream): X-Request-ID of the originating "
+            "HTTP request. Same conventions as StreamResult.request_id."
+        ),
+    )
 
 
 StreamMessage = Annotated[ StreamStdoutChunk | StreamStderrChunk | StreamHeartbeat | StreamResult | StreamError,
@@ -101,3 +117,11 @@ class PollingReadResponse(BaseModel):
     messages: list[StreamMessage] = Field(default_factory=list, description="Phase 6 substep 6: stream messages with index >= the requested ?since cursor. Same discriminated-union shape the WebSocket route sends.")
     next_cursor: int = Field(ge=0, description="Phase 6 substep 6: cursor to pass as ?since on the next poll. Equals the requested since plus len(messages).")
     done: bool = Field(description="Phase 6 substep 6: True once the execute has finished AND every message up to it has been delivered in this or an earlier poll. When True, the client stops polling.")
+    request_id: str = Field(
+        default="",
+        description=(
+            "Phase 7 substep 1 (7-reqid-stream): X-Request-ID of THIS GET request "
+            "(not the originating POST). Top-level so clients can correlate the "
+            "read with server logs without inspecting per-message frames."
+        ),
+    )

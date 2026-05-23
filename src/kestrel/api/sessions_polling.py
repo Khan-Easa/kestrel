@@ -68,6 +68,7 @@ async def _run_polling_execute(
     session_id: str,
     code: str,
     buffer: PollingBuffer,
+    request_id: str,
 ) -> None:
     """Background orchestrator — wraps ``execute_stream`` for the polling path.
 
@@ -90,6 +91,8 @@ async def _run_polling_execute(
         async with registry.acquire_for_execute(session_id) as runtime:
             outcome = "error"  # default if execute_stream raises mid-flight
             async for message in runtime.execute_stream(code):
+                if isinstance(message, (StreamResult, StreamError)):
+                    message = message.model_copy(update={"request_id": request_id})
                 await buffer.append(message)
                 if isinstance(message, StreamResult):
                     if message.timed_out:
@@ -100,39 +103,39 @@ async def _run_polling_execute(
                         outcome = "error"
     except SessionBusy:
         await buffer.append(
-            StreamError(code="session_busy", detail="another execute is in progress")
+            StreamError(code="session_busy", detail="another execute is in progress", request_id=request_id)
         )
     except SessionNotFound:
         await buffer.append(
-            StreamError(code="session_not_found", detail="session not found")
+            StreamError(code="session_not_found", detail="session not found", request_id=request_id)
         )
     except SessionTimeout:
         outcome = "timed_out"
         logger.info("polling_execute_timeout", session_id_prefix=session_id[:8])
         await buffer.append(
-            StreamError(code="session_timeout", detail="execution exceeded the time limit")
+            StreamError(code="session_timeout", detail="execution exceeded the time limit", request_id=request_id)
         )
     except SessionTerminated:
         outcome = "error"
         await buffer.append(
-            StreamError(code="session_terminated", detail="session is no longer running")
+            StreamError(code="session_terminated", detail="session is no longer running", request_id=request_id)
         )
     except SessionProtocolError:
         outcome = "error"
         logger.exception("polling_execute_protocol_error", session_id_prefix=session_id[:8])
         await buffer.append(
-            StreamError(code="protocol_error", detail="internal protocol error")
+            StreamError(code="protocol_error", detail="internal protocol error", request_id=request_id)
         )
     except RegistryUnavailable:
         logger.warning("polling_execute_registry_unavailable", session_id_prefix=session_id[:8])
         await buffer.append(
-            StreamError(code="registry_unavailable", detail="session store unavailable")
+            StreamError(code="registry_unavailable", detail="session store unavailable", request_id=request_id)
         )
     except Exception:
         if outcome is None:
             outcome = "error"
         logger.exception("polling_execute_failed", session_id_prefix=session_id[:8])
-        await buffer.append(StreamError(code="internal", detail="internal error"))
+        await buffer.append(StreamError(code="internal", detail="internal error", request_id=request_id))
     finally:
         if outcome is not None:
             EXECUTIONS.labels(backend="docker", outcome=outcome).inc()
@@ -163,8 +166,9 @@ async def start_polling_execute(
     buffer = PollingBuffer()
     registry._polling_buffers.setdefault(session_id, {})[execution_id] = buffer
     registry._refresh_metrics()
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
     buffer.task = asyncio.create_task(
-        _run_polling_execute(registry, session_id, req.code, buffer)
+        _run_polling_execute(registry, session_id, req.code, buffer, request_id)
     )
     logger.info(
         "polling_execute_started",
@@ -208,4 +212,5 @@ async def read_polling_execute(
         messages=new_messages,
         next_cursor=next_cursor,
         done=done,
+        request_id=structlog.contextvars.get_contextvars().get("request_id", ""),
     )
