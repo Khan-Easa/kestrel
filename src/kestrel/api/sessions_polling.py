@@ -23,6 +23,7 @@ Decision 6.6-buffer); this module is the only code that reads and writes it.
 """
 from __future__ import annotations
 
+import time
 import asyncio
 import uuid
 
@@ -35,6 +36,7 @@ from kestrel.api.schemas import (
     PollingExecuteResponse,
     PollingReadResponse,
     StreamError,
+    StreamResult,
 )
 from kestrel.api.sessions import get_session_registry
 from kestrel.config import Settings, get_settings
@@ -50,6 +52,7 @@ from kestrel.execution.session_runtime import (
     SessionTerminated,
     SessionTimeout,
 )
+from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 
 logger = structlog.get_logger()
 
@@ -75,11 +78,26 @@ async def _run_polling_execute(
     in the buffer rather than an exception nobody can catch (the POST handler
     that spawned this task has long since returned). ``mark_done`` always
     runs, so a polling client's ``done`` flag is guaranteed to flip.
+
+    Phase 7 substep 1: increments EXECUTIONS + EXECUTION_DURATION when the
+    execute actually starts (i.e. acquire_for_execute succeeds). SessionBusy /
+    SessionNotFound / RegistryUnavailable failures are not execution events —
+    they leave ``outcome=None`` and skip the counter.
     """
+    exec_start = time.perf_counter()
+    outcome: str | None = None
     try:
         async with registry.acquire_for_execute(session_id) as runtime:
+            outcome = "error"  # default if execute_stream raises mid-flight
             async for message in runtime.execute_stream(code):
                 await buffer.append(message)
+                if isinstance(message, StreamResult):
+                    if message.timed_out:
+                        outcome = "timed_out"
+                    elif message.exit_code == 0:
+                        outcome = "ok"
+                    else:
+                        outcome = "error"
     except SessionBusy:
         await buffer.append(
             StreamError(code="session_busy", detail="another execute is in progress")
@@ -89,15 +107,18 @@ async def _run_polling_execute(
             StreamError(code="session_not_found", detail="session not found")
         )
     except SessionTimeout:
+        outcome = "timed_out"
         logger.info("polling_execute_timeout", session_id_prefix=session_id[:8])
         await buffer.append(
             StreamError(code="session_timeout", detail="execution exceeded the time limit")
         )
     except SessionTerminated:
+        outcome = "error"
         await buffer.append(
             StreamError(code="session_terminated", detail="session is no longer running")
         )
     except SessionProtocolError:
+        outcome = "error"
         logger.exception("polling_execute_protocol_error", session_id_prefix=session_id[:8])
         await buffer.append(
             StreamError(code="protocol_error", detail="internal protocol error")
@@ -108,9 +129,14 @@ async def _run_polling_execute(
             StreamError(code="registry_unavailable", detail="session store unavailable")
         )
     except Exception:
+        if outcome is None:
+            outcome = "error"
         logger.exception("polling_execute_failed", session_id_prefix=session_id[:8])
         await buffer.append(StreamError(code="internal", detail="internal error"))
     finally:
+        if outcome is not None:
+            EXECUTIONS.labels(backend="docker", outcome=outcome).inc()
+            EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
         await buffer.mark_done()
 
 
@@ -136,6 +162,7 @@ async def start_polling_execute(
     execution_id = uuid.uuid4().hex
     buffer = PollingBuffer()
     registry._polling_buffers.setdefault(session_id, {})[execution_id] = buffer
+    registry._refresh_metrics()
     buffer.task = asyncio.create_task(
         _run_polling_execute(registry, session_id, req.code, buffer)
     )

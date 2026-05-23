@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import structlog
 from fastapi import APIRouter, Depends, Response  # NEW: + Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # NEW
@@ -8,6 +9,7 @@ from kestrel.api.auth import require_api_key
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
 from kestrel.execution import Executor, get_executor
+from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 
 logger = structlog.get_logger()
 
@@ -31,7 +33,25 @@ async def execute(
     executor: Executor = Depends(get_executor),
 ) -> ExecuteResponse:
     """Run user-supplied Python code via the configured executor; return captured output."""
-    result = await executor.run(req.code, settings)
+    backend = settings.executor_backend
+    start = time.perf_counter()
+    try:
+        result = await executor.run(req.code, settings)
+    except Exception:
+        EXECUTIONS.labels(backend=backend, outcome="error").inc()
+        EXECUTION_DURATION.labels(backend=backend).observe(time.perf_counter() - start)
+        raise
+
+    duration = time.perf_counter() - start
+    if result.timed_out:
+        outcome = "timed_out"
+    elif result.exit_code == 0:
+        outcome = "ok"
+    else:
+        outcome = "error"
+    EXECUTIONS.labels(backend=backend, outcome=outcome).inc()
+    EXECUTION_DURATION.labels(backend=backend).observe(duration)
+
     logger.info(
         "execute_completed",
         code_length=len(req.code),

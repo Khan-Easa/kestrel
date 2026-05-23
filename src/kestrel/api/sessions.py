@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import structlog
 from fastapi import APIRouter, Depends, Request, status
 
@@ -12,6 +13,7 @@ from kestrel.api.schemas import (
 )
 from kestrel.execution.session_registry import SessionRegistry
 from kestrel.execution.session_runtime import SessionTimeout
+from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 
 logger = structlog.get_logger()
 
@@ -87,15 +89,29 @@ async def execute_in_session(
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
 ) -> SessionExecuteResponse:
-    try:
-        async with registry.acquire_for_execute(session_id) as runtime:
+    backend = "docker"  # session containers are always docker
+    async with registry.acquire_for_execute(session_id) as runtime:
+        start = time.perf_counter()
+        try:
             result = await runtime.execute(req.code)
-    except SessionTimeout:
-        logger.info(
-            "session_execute_timed_out",
-            session_id_prefix=session_id[:8],
-        )
-        return SessionExecuteResponse(timed_out=True, exit_code=-1, outputs=[])
+        except SessionTimeout:
+            EXECUTIONS.labels(backend=backend, outcome="timed_out").inc()
+            EXECUTION_DURATION.labels(backend=backend).observe(time.perf_counter() - start)
+            logger.info(
+                "session_execute_timed_out",
+                session_id_prefix=session_id[:8],
+            )
+            return SessionExecuteResponse(timed_out=True, exit_code=-1, outputs=[])
+
+    duration = time.perf_counter() - start
+    if result.timed_out:
+        outcome = "timed_out"
+    elif result.exit_code == 0:
+        outcome = "ok"
+    else:
+        outcome = "error"
+    EXECUTIONS.labels(backend=backend, outcome=outcome).inc()
+    EXECUTION_DURATION.labels(backend=backend).observe(duration)
 
     logger.info(
         "session_execute_completed",

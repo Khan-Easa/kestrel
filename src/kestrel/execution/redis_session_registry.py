@@ -26,6 +26,11 @@ from kestrel.execution.session_registry import (
     _utcnow,
 )
 from kestrel.execution.session_runtime import SessionRuntime
+from kestrel.observability import (
+    POLLING_BUFFERS_ACTIVE,
+    SESSIONS_ACTIVE,
+    SESSION_POOL_SIZE,
+)
 
 _logger = structlog.get_logger()
 
@@ -105,6 +110,19 @@ class RedisSessionRegistry:
             int(settings.session_sweep_interval_seconds * 2),
         )
 
+    def _refresh_metrics(self) -> None:
+        """Phase 7 substep 1: refresh per-worker gauges from current state.
+
+        Same shape as ``InMemorySessionRegistry._refresh_metrics``. Each
+        backend exposes its own per-worker gauges; Prometheus aggregation
+        across workers happens at query time via ``sum()``.
+        """
+        SESSIONS_ACTIVE.set(len(self._sessions))
+        SESSION_POOL_SIZE.set(len(self._pool))
+        POLLING_BUFFERS_ACTIVE.set(
+            sum(len(by_execution) for by_execution in self._polling_buffers.values())
+        )
+
     # ──────────────────── public API ────────────────────
 
     @_redis_errors_to_unavailable
@@ -161,6 +179,7 @@ class RedisSessionRegistry:
             local_sessions=len(self._sessions),
             from_pool=from_pool,
         )
+        self._refresh_metrics()
         return info
 
     def get_runtime(self, session_id: str) -> SessionRuntime:
@@ -263,6 +282,7 @@ class RedisSessionRegistry:
         entry = self._sessions.pop(session_id, None)
         if entry is not None:
             await entry.runtime.close()
+        self._refresh_metrics()
         _logger.info(
             "session_deleted",
             session_id_prefix=session_id[:8],
@@ -299,6 +319,7 @@ class RedisSessionRegistry:
             worker_id_prefix=self._worker_id[:8],
             ttl_seconds=self._redis_ttl_seconds,
         )
+        self._refresh_metrics()
 
     async def aclose(self) -> None:
         """Cancel the sweeper, wait for in-flight refills, remove this worker's
@@ -346,6 +367,7 @@ class RedisSessionRegistry:
             except RedisError:
                 pass
             self._client = None
+        self._refresh_metrics()
 
     # ──────────────────── private ────────────────────
 
@@ -389,6 +411,7 @@ class RedisSessionRegistry:
             await runtime.close()
             return
         self._pool.append(runtime)
+        self._refresh_metrics()
         _logger.info("pool_refilled", pool_size=len(self._pool))
 
     async def _sweep_loop(self) -> None:
@@ -468,3 +491,4 @@ class RedisSessionRegistry:
                     "redis_evict_cleanup_failed", session_id_prefix=sid[:8]
                 )
             _logger.info("session_evicted_idle", session_id_prefix=sid[:8])
+        self._refresh_metrics()

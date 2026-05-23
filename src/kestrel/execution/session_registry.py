@@ -9,6 +9,11 @@ from typing import Protocol, runtime_checkable
 
 import structlog
 
+from kestrel.observability import (
+    POLLING_BUFFERS_ACTIVE,
+    SESSIONS_ACTIVE,
+    SESSION_POOL_SIZE,
+)
 from kestrel.config import Settings
 from kestrel.execution.session_runtime import SessionRuntime
 
@@ -190,6 +195,20 @@ class InMemorySessionRegistry:
         self._refill_tasks: set[asyncio.Task[None]] = set()
         self._polling_buffers: dict[str, dict[str, PollingBuffer]] = {}
 
+    def _refresh_metrics(self) -> None:
+        """Phase 7 substep 1: refresh per-worker gauges from current state.
+
+        Called at the tail of every method that mutates ``self._sessions``,
+        ``self._pool``, or ``self._polling_buffers``. Cheap (three ``.set()``
+        calls on float-backed gauges); avoids drift that hand-maintained
+        inc/dec pairs would risk.
+        """
+        SESSIONS_ACTIVE.set(len(self._sessions))
+        SESSION_POOL_SIZE.set(len(self._pool))
+        POLLING_BUFFERS_ACTIVE.set(
+            sum(len(by_execution) for by_execution in self._polling_buffers.values())
+        )
+
     # ──────────────────── public API ────────────────────
 
     async def create(self) -> SessionInfo:
@@ -223,6 +242,7 @@ class InMemorySessionRegistry:
             total_sessions=len(self._sessions),
             from_pool=from_pool,
         )
+        self._refresh_metrics()
         return info
 
     def get_runtime(self, session_id: str) -> SessionRuntime:
@@ -271,6 +291,7 @@ class InMemorySessionRegistry:
             raise SessionNotFound(session_id)
         self._polling_buffers.pop(session_id, None)
         await entry.runtime.close()
+        self._refresh_metrics()
         _logger.info(
             "session_deleted",
             session_id_prefix=session_id[:8],
@@ -293,6 +314,7 @@ class InMemorySessionRegistry:
 
         for _ in range(self._settings.session_pool_size):
             self._schedule_refill()
+        self._refresh_metrics()
 
     async def aclose(self) -> None:
         """Cancel the sweeper, wait for in-flight refills, close every live runtime
@@ -325,6 +347,7 @@ class InMemorySessionRegistry:
                 *(rt.close() for rt in runtimes),
                 return_exceptions=True,
             )
+        self._refresh_metrics()
 
     # ──────────────────── private ────────────────────
 
@@ -368,6 +391,7 @@ class InMemorySessionRegistry:
             await runtime.close()
             return
         self._pool.append(runtime)
+        self._refresh_metrics()
         _logger.info("pool_refilled", pool_size=len(self._pool))
 
     async def _sweep_loop(self) -> None:
@@ -405,3 +429,4 @@ class InMemorySessionRegistry:
                 session_id_prefix=session_id[:8],
                 remaining_sessions=len(self._sessions),
             )
+        self._refresh_metrics()
