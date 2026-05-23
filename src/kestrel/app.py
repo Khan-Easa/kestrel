@@ -24,6 +24,7 @@ from kestrel.execution.session_runtime import (
     SessionTerminated,
 )
 from kestrel.logging import configure_logging
+from kestrel.observability import HTTP_REQUESTS, HTTP_REQUEST_DURATION
 
 logger = structlog.get_logger()
 
@@ -71,6 +72,10 @@ def create_app() -> FastAPI:
         logger.warning("registry_unavailable")
         return JSONResponse(status_code=503, content={"detail": "session store unavailable"})
 
+    def _route_label(request: Request) -> str:
+        route = request.scope.get("route")
+        return getattr(route, "path", None) or "unmatched"
+
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
@@ -87,16 +92,27 @@ def create_app() -> FastAPI:
         try:
             response = await call_next(request)
         except Exception:
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            logger.exception("request_failed", duration_ms=duration_ms)
+            duration = time.perf_counter() - start
+            route_label = _route_label(request)
+            HTTP_REQUESTS.labels(route=route_label, method=request.method, status="500").inc()
+            HTTP_REQUEST_DURATION.labels(route=route_label, method=request.method).observe(duration)
+            logger.exception("request_failed", duration_ms=int(duration * 1000))
             raise
-        duration_ms = int((time.perf_counter() - start) * 1000)
+
+        duration = time.perf_counter() - start
+        route_label = _route_label(request)
+        HTTP_REQUESTS.labels(
+            route=route_label,
+            method=request.method,
+            status=str(response.status_code),
+        ).inc()
+        HTTP_REQUEST_DURATION.labels(route=route_label, method=request.method).observe(duration)
 
         response.headers["X-Request-ID"] = request_id
         logger.info(
             "request_finished",
             status_code=response.status_code,
-            duration_ms=duration_ms,
+            duration_ms=int(duration * 1000),
         )
         return response
 

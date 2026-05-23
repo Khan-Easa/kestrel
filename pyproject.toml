@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "structlog>=24.1",
     "redis[hiredis]>=5.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
