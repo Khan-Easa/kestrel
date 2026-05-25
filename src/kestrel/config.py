@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     database_url: str = Field(default="", description="Phase 7 substep 2: SQLAlchemy async URL (e.g.'postgresql+asyncpg://user:pw@localhost:5432/kestrel'). Required when audit_backend='postgres' or any later Phase 7 substep needs Postgres.")
     audit_queue_max_size: int = Field(default=1000, gt=0, description="Phase 7 substep 2: max in-flight audit events queued for the background drain task. Overflow drops events + bumps kestrel_audit_dropped_total. Decision 7-audit-sync.")
     audit_shutdown_drain_seconds: float = Field(default=5.0, gt=0.0, description="Phase 7 substep 2: lifespan-shutdown grace window for the audit drain task to flush remaining events before the process exits.")
+    api_key_backend: Literal["null", "postgres"] = Field(default="null", description="Phase 7 substep 3: API-key auth store. 'null' (default) = dev-only via KESTREL_DEV_API_KEY (Phase 1-6 behavior preserved). 'postgres' = Postgres-backed store + KESTREL_DEV_API_KEY opt-in shim per 7-pg-required. Opt-in via KESTREL_API_KEY_BACKEND.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

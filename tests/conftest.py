@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from kestrel.audit import NullAuditSink, PostgresAuditSink
+from kestrel.api_keys import PostgresApiKeyStore
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
@@ -333,11 +334,11 @@ def postgres_migrations_applied() -> bool:
 @pytest.fixture
 async def postgres_engine(postgres_migrations_applied):
     """Async engine pointed at the test Postgres. Truncates audit_events
-    before yielding so each test starts with an empty table. Disposes
-    in teardown."""
+    + api_keys before yielding so each test starts with empty tables.
+    Disposes in teardown."""
     engine = create_async_engine(TEST_DATABASE_URL, future=True)
     async with engine.begin() as conn:
-        await conn.execute(text("TRUNCATE audit_events"))
+        await conn.execute(text("TRUNCATE audit_events, api_keys"))
     yield engine
     await engine.dispose()
 
@@ -389,3 +390,22 @@ def audit_postgres_client(postgres_engine, monkeypatch):
         yield client
 
     get_settings.cache_clear()
+
+
+@pytest.fixture
+async def api_key_store_factory(postgres_engine):
+    """Yields an async factory ``_make()`` that builds + starts a
+    PostgresApiKeyStore bound to the per-test engine. Every store is
+    aclose()'d in teardown."""
+    stores: list[PostgresApiKeyStore] = []
+
+    async def _make() -> PostgresApiKeyStore:
+        store = PostgresApiKeyStore(postgres_engine)
+        await store.start()
+        stores.append(store)
+        return store
+
+    yield _make
+
+    for store in stores:
+        await store.aclose()

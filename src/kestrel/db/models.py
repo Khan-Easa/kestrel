@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """SQLAlchemy table models for Kestrel's Postgres-backed persistence.
 
-Two-class split per decision 7-audit-schema-split:
+Two-class split per decision 7-audit-schema-split (for audit only):
 - ``AuditEventRow`` (this file): the persisted row shape. SQLAlchemy-bound, has
 a primary key, server-side timestamp default, indexed columns for the
 queries operators actually run (request_id lookups, time-range scans).
@@ -13,13 +13,19 @@ The Postgres sink translates pydantic AuditEvent -> SA AuditEventRow at the
 moment of insert. Doing the split this way means non-Postgres sinks
 (``NullAuditSink`` today, possibly file/HTTP sinks later) don't pull
 SQLAlchemy in.
+
+For API keys (Phase 7 substep 3, decision 7-key-storage): ``ApiKey`` is the
+single source of truth — no parallel pydantic class. Auth is on the hot
+path; we keep the SA row and a small ``ApiKeyInfo`` dataclass (in
+``kestrel.api_keys``) for the public-API shape, without the audit-style
+pydantic+SA double.
 """
 
 import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -57,4 +63,34 @@ class AuditEventRow(Base):
         Index("ix_audit_events_ts", "ts"),
         Index("ix_audit_events_request_id", "request_id"),
         Index("ix_audit_events_api_key_id", "api_key_id"),
+    )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    key_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+    )
+    label: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    scopes: Mapped[list[str]] = mapped_column(
+        ARRAY(String),
+        nullable=False,
+        default=lambda: ["execute"],
     )

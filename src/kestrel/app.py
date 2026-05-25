@@ -15,6 +15,7 @@ from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
 from kestrel.audit import build_audit_sink
+from kestrel.api_keys import build_api_key_store
 from kestrel.db.session import build_engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 from kestrel.execution.session_registry import (
@@ -44,12 +45,15 @@ def create_app() -> FastAPI:
         app.state.registry = registry
 
         engine: AsyncEngine | None = None
-        if settings.audit_backend == "postgres":
+        if settings.audit_backend == "postgres" or settings.api_key_backend == "postgres":
             engine = build_engine(settings)
 
         try:
             audit_sink = build_audit_sink(settings, engine=engine)
             await audit_sink.start()
+            api_key_store = build_api_key_store(settings, engine=engine)
+            if api_key_store is not None:
+                await api_key_store.start()
         except Exception:
             if engine is not None:
                 await engine.dispose()
@@ -57,10 +61,13 @@ def create_app() -> FastAPI:
             raise
 
         app.state.audit_sink = audit_sink
+        app.state.api_key_store = api_key_store
 
         try:
             yield
         finally:
+            if api_key_store is not None:
+                await api_key_store.aclose()
             await audit_sink.aclose()
             if engine is not None:
                 await engine.dispose()
