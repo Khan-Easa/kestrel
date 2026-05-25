@@ -11,6 +11,7 @@ from kestrel.config import Settings, get_settings
 from kestrel.execution import Executor, get_executor
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 from kestrel.audit import AuditEvent, AuditSink, get_audit_sink
+from kestrel.api_keys import ApiKeyInfo, audit_id_for
 
 logger = structlog.get_logger()
 
@@ -33,10 +34,12 @@ async def execute(
     settings: Settings = Depends(get_settings),
     executor: Executor = Depends(get_executor),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> ExecuteResponse:
     """Run user-supplied Python code via the configured executor; return captured output."""
     backend = settings.executor_backend
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     start = time.perf_counter()
     try:
         result = await executor.run(req.code, settings)
@@ -50,6 +53,7 @@ async def execute(
                 route="/execute",
                 method="POST",
                 status=500,
+                api_key_id=audit_api_key_id,
                 code_length=len(req.code),
                 error_kind=type(e).__name__,
                 duration_ms=int(duration * 1000),
@@ -73,6 +77,7 @@ async def execute(
             route="/execute",
             method="POST",
             status=200,
+            api_key_id=audit_api_key_id,
             code_length=len(req.code),
             exit_code=result.exit_code,
             timed_out=result.timed_out,

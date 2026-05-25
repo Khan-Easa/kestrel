@@ -191,3 +191,18 @@ def get_api_key_store(request: Request) -> ApiKeyStore | None:
     lifespan, or ``None`` when ``api_key_backend == "null"``. Slice 2's
     ``require_api_key`` consumes this dep and branches on ``None``."""
     return request.app.state.api_key_store
+
+
+def audit_id_for(info: ApiKeyInfo | str | None) -> str | None:
+    """Convert ``require_api_key``'s return value into the audit row's
+    ``api_key_id`` field.
+
+    - ``None`` (auth disabled) → ``None``.
+    - ``"dev"`` (dev-shim sentinel) → ``"dev"`` unchanged.
+    - ``ApiKeyInfo`` (store-verified) → ``str(info.id)``.
+    """
+    if info is None:
+        return None
+    if isinstance(info, str):
+        return info
+    return str(info.id)

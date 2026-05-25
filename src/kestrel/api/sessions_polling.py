@@ -54,6 +54,7 @@ from kestrel.execution.session_runtime import (
 )
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 from kestrel.audit import AuditEvent, AuditSink, get_audit_sink
+from kestrel.api_keys import ApiKeyInfo, audit_id_for
 
 logger = structlog.get_logger()
 
@@ -72,6 +73,7 @@ async def _run_polling_execute(
     request_id: str,
     audit: AuditSink,
     execution_id: str,
+    api_key_id: str | None,
 ) -> None:
     """Background orchestrator — wraps ``execute_stream`` for the polling path.
 
@@ -181,6 +183,7 @@ async def _run_polling_execute(
                 route="/sessions/{session_id}/execute/polling",
                 method="POST",
                 status=audit_status,
+                api_key_id=api_key_id,
                 session_id=session_id,
                 execution_id=execution_id,
                 code_length=len(code),
@@ -203,6 +206,7 @@ async def start_polling_execute(
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> PollingExecuteResponse:
     """Start an execute on a background task; return its execution_id at once.
 
@@ -226,7 +230,8 @@ async def start_polling_execute(
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
     buffer.task = asyncio.create_task(
         _run_polling_execute(
-            registry, session_id, req.code, buffer, request_id, audit, execution_id
+            registry, session_id, req.code, buffer, request_id, audit,
+            execution_id, audit_id_for(api_key_info),
         )
     )
     logger.info(

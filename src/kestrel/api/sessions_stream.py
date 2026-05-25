@@ -18,14 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 import time
 import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
+from kestrel.api.auth import AuthRejected, verify_bearer
 from kestrel.api.schemas import ExecuteRequest, StreamError, StreamHeartbeat, StreamResult
+from kestrel.api_keys import ApiKeyStore, audit_id_for
 from kestrel.config import Settings, get_settings
 from kestrel.execution.session_registry import (
     SessionBusy,
@@ -62,6 +63,11 @@ def get_audit_sink(websocket: WebSocket) -> AuditSink:
     return websocket.app.state.audit_sink
 
 
+def get_api_key_store(websocket: WebSocket) -> ApiKeyStore | None:
+    """WebSocket variant of the HTTP api-key-store provider in ``kestrel.api_keys``."""
+    return websocket.app.state.api_key_store
+
+
 def _extract_token(websocket: WebSocket) -> str | None:
     """Get bearer token from Authorization header OR ``token`` query param.
 
@@ -75,15 +81,6 @@ def _extract_token(websocket: WebSocket) -> str | None:
     if auth_header and auth_header.lower().startswith("bearer "):
         return auth_header[7:]
     return websocket.query_params.get("token")
-
-
-def _auth_ok(provided: str | None, expected: str) -> bool:
-    """Constant-time bearer comparison. Empty expected = auth disabled."""
-    if expected == "":
-        return True
-    if not provided:
-        return False
-    return secrets.compare_digest(provided, expected)
 
 
 async def _safe_close(websocket: WebSocket, code: int, reason: str) -> None:
@@ -106,6 +103,7 @@ async def execute_in_session_stream(
     registry: SessionRegistry = Depends(get_session_registry),
     settings: Settings = Depends(get_settings),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_store: ApiKeyStore | None = Depends(get_api_key_store),
 ) -> None:
     """Phase 6 substep 4: streaming execute over WebSocket.
 
@@ -127,7 +125,9 @@ async def execute_in_session_stream(
     - 4410 session terminated (kernel dead — SessionTerminated or SessionTimeout)
     """
     token = _extract_token(websocket)
-    if not _auth_ok(token, settings.dev_api_key):
+    try:
+        api_key_info = await verify_bearer(token, settings, api_key_store)
+    except AuthRejected:
         await _safe_close(websocket, 4401, "auth_failed")
         return
     
@@ -151,6 +151,7 @@ async def execute_in_session_stream(
     audit_exit_code: int | None = None
     audit_timed_out: bool | None = None
     audit_code_length: int | None = None
+    audit_api_key_id: str | None = audit_id_for(api_key_info)
     audit_start = time.perf_counter()
     try:
         logger.info("session_stream_accepted", session_id_prefix=session_id[:8])
@@ -401,6 +402,7 @@ async def execute_in_session_stream(
                 route="/sessions/{session_id}/execute/stream",
                 method="WS",
                 status=audit_status,
+                api_key_id=audit_api_key_id,
                 session_id=session_id,
                 code_length=audit_code_length,
                 exit_code=audit_exit_code,

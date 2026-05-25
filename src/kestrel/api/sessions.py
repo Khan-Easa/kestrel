@@ -15,6 +15,7 @@ from kestrel.execution.session_registry import SessionRegistry
 from kestrel.execution.session_runtime import SessionTimeout
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
 from kestrel.audit import AuditEvent, AuditSink, get_audit_sink, http_status_for_exception
+from kestrel.api_keys import ApiKeyInfo, audit_id_for
 
 logger = structlog.get_logger()
 
@@ -39,8 +40,10 @@ router = APIRouter(
 async def create_session(
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> SessionResponse:
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     start = time.perf_counter()
     try:
         info = await registry.create()
@@ -51,6 +54,7 @@ async def create_session(
                 route="/sessions",
                 method="POST",
                 status=http_status_for_exception(e),
+                api_key_id=audit_api_key_id,
                 error_kind=type(e).__name__,
                 duration_ms=int((time.perf_counter() - start) * 1000),
             )
@@ -62,6 +66,7 @@ async def create_session(
             route="/sessions",
             method="POST",
             status=201,
+            api_key_id=audit_api_key_id,
             session_id=info.session_id,
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
@@ -76,8 +81,10 @@ async def create_session(
 async def list_sessions(
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> SessionListResponse:
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     start = time.perf_counter()
     try:
         infos = await registry.list()
@@ -88,6 +95,7 @@ async def list_sessions(
                 route="/sessions",
                 method="GET",
                 status=http_status_for_exception(e),
+                api_key_id=audit_api_key_id,
                 error_kind=type(e).__name__,
                 duration_ms=int((time.perf_counter() - start) * 1000),
             )
@@ -99,6 +107,7 @@ async def list_sessions(
             route="/sessions",
             method="GET",
             status=200,
+            api_key_id=audit_api_key_id,
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
     )
@@ -115,8 +124,10 @@ async def get_session(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> SessionResponse:
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     start = time.perf_counter()
     try:
         info = await registry.get_info(session_id)
@@ -127,6 +138,7 @@ async def get_session(
                 route="/sessions/{session_id}",
                 method="GET",
                 status=http_status_for_exception(e),
+                api_key_id=audit_api_key_id,
                 session_id=session_id,
                 error_kind=type(e).__name__,
                 duration_ms=int((time.perf_counter() - start) * 1000),
@@ -139,6 +151,7 @@ async def get_session(
             route="/sessions/{session_id}",
             method="GET",
             status=200,
+            api_key_id=audit_api_key_id,
             session_id=session_id,
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
@@ -154,8 +167,10 @@ async def delete_session(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> None:
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     start = time.perf_counter()
     try:
         await registry.delete(session_id)
@@ -166,6 +181,7 @@ async def delete_session(
                 route="/sessions/{session_id}",
                 method="DELETE",
                 status=http_status_for_exception(e),
+                api_key_id=audit_api_key_id,
                 session_id=session_id,
                 error_kind=type(e).__name__,
                 duration_ms=int((time.perf_counter() - start) * 1000),
@@ -178,6 +194,7 @@ async def delete_session(
             route="/sessions/{session_id}",
             method="DELETE",
             status=204,
+            api_key_id=audit_api_key_id,
             session_id=session_id,
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
@@ -193,9 +210,11 @@ async def execute_in_session(
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
     audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
 ) -> SessionExecuteResponse:
     backend = "docker"  # session containers are always docker
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    audit_api_key_id = audit_id_for(api_key_info)
     overall_start = time.perf_counter()
     try:
         async with registry.acquire_for_execute(session_id) as runtime:
@@ -215,6 +234,7 @@ async def execute_in_session(
                         route="/sessions/{session_id}/execute",
                         method="POST",
                         status=200,
+                        api_key_id=audit_api_key_id,
                         session_id=session_id,
                         code_length=len(req.code),
                         exit_code=-1,
@@ -230,6 +250,7 @@ async def execute_in_session(
                 route="/sessions/{session_id}/execute",
                 method="POST",
                 status=http_status_for_exception(e),
+                api_key_id=audit_api_key_id,
                 session_id=session_id,
                 code_length=len(req.code),
                 error_kind=type(e).__name__,
@@ -254,6 +275,7 @@ async def execute_in_session(
             route="/sessions/{session_id}/execute",
             method="POST",
             status=200,
+            api_key_id=audit_api_key_id,
             session_id=session_id,
             code_length=len(req.code),
             exit_code=result.exit_code,

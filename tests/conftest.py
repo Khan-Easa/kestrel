@@ -94,8 +94,8 @@ def client(request: pytest.FixtureRequest) -> TestClient:
     else:
         app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     app.state.audit_sink = NullAuditSink()
+    app.state.api_key_store = None
     return TestClient(app)
-
 @pytest.fixture
 def docker_client() -> TestClient:
     """Always-Docker variant for isolation-specific tests."""
@@ -105,6 +105,7 @@ def docker_client() -> TestClient:
     app = create_app()
     app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     app.state.audit_sink = NullAuditSink()
+    app.state.api_key_store = None
     return TestClient(app)
 
 
@@ -409,3 +410,53 @@ async def api_key_store_factory(postgres_engine):
 
     for store in stores:
         await store.aclose()
+
+
+@pytest.fixture
+def api_postgres_client(postgres_engine, monkeypatch):
+    """TestClient with audit_backend=postgres + api_key_backend=postgres +
+    dev_api_key='' (no dev shim). Real PostgresAuditSink + PostgresApiKeyStore
+    bound to app.state. Used by store-only auth tests."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+    monkeypatch.setenv("KESTREL_AUDIT_BACKEND", "postgres")
+    monkeypatch.setenv("KESTREL_API_KEY_BACKEND", "postgres")
+    monkeypatch.setenv("KESTREL_DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("KESTREL_DEV_API_KEY", "")
+    get_settings.cache_clear()
+
+    app = create_app()
+    with TestClient(app) as client:
+        yield client
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def api_postgres_client_with_dev_shim(postgres_engine, monkeypatch):
+    """Like api_postgres_client but with KESTREL_DEV_API_KEY set so the
+    dev shim path is exercisable. Used by dev-shim auth tests."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+    monkeypatch.setenv("KESTREL_AUDIT_BACKEND", "postgres")
+    monkeypatch.setenv("KESTREL_API_KEY_BACKEND", "postgres")
+    monkeypatch.setenv("KESTREL_DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("KESTREL_DEV_API_KEY", "test-dev-shim-12345")
+    get_settings.cache_clear()
+
+    app = create_app()
+    with TestClient(app) as client:
+        yield client
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+async def mint_api_key(api_key_store_factory):
+    """Yields an async ``mint(label, scopes=None) -> (token, info)`` callable
+    that creates API keys via a PostgresApiKeyStore on the per-test engine.
+    The keys are visible to the app's own store (same DB)."""
+    store = await api_key_store_factory()
+
+    async def _mint(label: str = "test", scopes: list[str] | None = None):
+        return await store.create(label, scopes)
+
+    yield _mint
