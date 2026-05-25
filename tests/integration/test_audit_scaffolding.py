@@ -1,8 +1,7 @@
 """Phase 7 substep 2 slice 1: audit scaffolding tests.
 
 No Postgres required. Verifies factory selection, Null sink no-op behavior,
-lifespan binding, and that the postgres path errors clearly (slice 2 fills
-it in).
+lifespan binding, and and that the postgres path requires an engine (lifespan owns it,\ndecision 7.2-engine-owner).
 """
 
 from __future__ import annotations
@@ -22,9 +21,9 @@ def test_build_audit_sink_defaults_to_null():
     assert isinstance(sink, AuditSink)
 
 
-def test_build_audit_sink_postgres_raises_until_slice_2():
+def test_build_audit_sink_postgres_requires_engine():
     settings = Settings(audit_backend="postgres", database_url="postgresql+asyncpg://x/y")
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="engine"):
         build_audit_sink(settings)
 
 

@@ -15,6 +15,8 @@ from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
 from kestrel.audit import build_audit_sink
+from kestrel.db.session import build_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 from kestrel.execution.session_registry import (
     RegistryUnavailable,
     SessionBusy,
@@ -41,14 +43,27 @@ def create_app() -> FastAPI:
         await registry.start()
         app.state.registry = registry
 
-        audit_sink = build_audit_sink(settings)
-        await audit_sink.start()
+        engine: AsyncEngine | None = None
+        if settings.audit_backend == "postgres":
+            engine = build_engine(settings)
+
+        try:
+            audit_sink = build_audit_sink(settings, engine=engine)
+            await audit_sink.start()
+        except Exception:
+            if engine is not None:
+                await engine.dispose()
+            await registry.aclose()
+            raise
+
         app.state.audit_sink = audit_sink
 
         try:
             yield
         finally:
             await audit_sink.aclose()
+            if engine is not None:
+                await engine.dispose()
             await registry.aclose()
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)

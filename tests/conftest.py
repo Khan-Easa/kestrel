@@ -1,4 +1,5 @@
 import shutil
+import asyncio
 import subprocess
 from collections.abc import Callable
 from functools import lru_cache
@@ -7,7 +8,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 import redis.asyncio
+import os
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from kestrel.audit import PostgresAuditSink
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
@@ -18,6 +25,8 @@ from kestrel.execution.session_registry import InMemorySessionRegistry
 from kestrel.execution.redis_session_registry import RedisSessionRegistry
 
 TEST_REDIS_URL = "redis://localhost:6379/15"  # db 15 — isolated from real data
+TEST_DATABASE_URL = "postgresql+asyncpg://postgres:kestrel@localhost:5432/postgres"
+
 
 @lru_cache(maxsize=1)
 def _docker_reachable() -> bool:
@@ -33,6 +42,31 @@ def _docker_reachable() -> bool:
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
+        return False
+
+@lru_cache(maxsize=1)
+def _postgres_reachable() -> bool:
+    """Quick check that Postgres answers on the test URL."""
+    try:
+        import asyncpg
+
+        async def _check() -> bool:
+            try:
+                conn = await asyncpg.connect(
+                    host="localhost",
+                    port=5432,
+                    user="postgres",
+                    password="kestrel",
+                    database="postgres",
+                    timeout=2.0,
+                )
+                await conn.close()
+                return True
+            except Exception:
+                return False
+
+        return asyncio.run(_check())
+    except Exception:
         return False
     
 @lru_cache(maxsize=1)
@@ -280,3 +314,55 @@ async def redis_inspector():
         yield client
     finally:
         await client.aclose()
+
+
+@pytest.fixture(scope="session")
+def postgres_migrations_applied() -> bool:
+    """Run alembic upgrade head once per pytest session. Skips if Postgres
+    is unreachable. Returns True so per-test fixtures can depend on it."""
+    if not _postgres_reachable():
+        pytest.skip("postgres unreachable")
+
+    os.environ["KESTREL_DATABASE_URL"] = TEST_DATABASE_URL
+    alembic_cfg = AlembicConfig("alembic.ini")
+    command.upgrade(alembic_cfg, "head")
+    return True
+
+
+@pytest.fixture
+async def postgres_engine(postgres_migrations_applied):
+    """Async engine pointed at the test Postgres. Truncates audit_events
+    before yielding so each test starts with an empty table. Disposes
+    in teardown."""
+    engine = create_async_engine(TEST_DATABASE_URL, future=True)
+    async with engine.begin() as conn:
+        await conn.execute(text("TRUNCATE audit_events"))
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture
+async def postgres_audit_sink_factory(postgres_engine):
+    """Yields an async factory ``_make(**settings_overrides)`` that builds
+    *started* PostgresAuditSink instances bound to the per-test engine.
+    Every sink is aclose()'d in teardown."""
+    sinks: list[PostgresAuditSink] = []
+
+    async def _make(**overrides: Any) -> PostgresAuditSink:
+        defaults = {
+            "audit_backend": "postgres",
+            "database_url": TEST_DATABASE_URL,
+            "audit_queue_max_size": 1000,
+            "audit_shutdown_drain_seconds": 2.0,
+        }
+        defaults.update(overrides)
+        settings = Settings(**defaults)
+        sink = PostgresAuditSink(settings, postgres_engine)
+        await sink.start()
+        sinks.append(sink)
+        return sink
+
+    yield _make
+
+    for sink in sinks:
+        await sink.aclose()
