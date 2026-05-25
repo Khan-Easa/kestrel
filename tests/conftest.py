@@ -14,7 +14,7 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from kestrel.audit import PostgresAuditSink
+from kestrel.audit import NullAuditSink, PostgresAuditSink
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
@@ -92,8 +92,8 @@ def client(request: pytest.FixtureRequest) -> TestClient:
         app.dependency_overrides[get_executor] = lambda: SubprocessExecutor()
     else:
         app.dependency_overrides[get_executor] = lambda: DockerExecutor()
+    app.state.audit_sink = NullAuditSink()
     return TestClient(app)
-
 
 @pytest.fixture
 def docker_client() -> TestClient:
@@ -103,6 +103,7 @@ def docker_client() -> TestClient:
 
     app = create_app()
     app.dependency_overrides[get_executor] = lambda: DockerExecutor()
+    app.state.audit_sink = NullAuditSink()
     return TestClient(app)
 
 
@@ -366,3 +367,25 @@ async def postgres_audit_sink_factory(postgres_engine):
 
     for sink in sinks:
         await sink.aclose()
+
+
+@pytest.fixture
+def audit_postgres_client(postgres_engine, monkeypatch):
+    """TestClient with audit_backend=postgres + database_url=TEST_DATABASE_URL.
+    Lifespan runs and binds a real PostgresAuditSink to app.state.audit_sink
+    that writes to the test Postgres database.
+
+    Mutates the env var before create_app() so the captured settings inside
+    the lifespan see audit_backend='postgres'. Clears the get_settings cache
+    on entry and teardown so other tests get fresh defaults."""
+    if not _docker_reachable():
+        pytest.skip("docker daemon unreachable")
+    monkeypatch.setenv("KESTREL_AUDIT_BACKEND", "postgres")
+    monkeypatch.setenv("KESTREL_DATABASE_URL", TEST_DATABASE_URL)
+    get_settings.cache_clear()
+
+    app = create_app()
+    with TestClient(app) as client:
+        yield client
+
+    get_settings.cache_clear()

@@ -10,6 +10,7 @@ from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
 from kestrel.execution import Executor, get_executor
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
+from kestrel.audit import AuditEvent, AuditSink, get_audit_sink
 
 logger = structlog.get_logger()
 
@@ -31,15 +32,29 @@ async def execute(
     req: ExecuteRequest,
     settings: Settings = Depends(get_settings),
     executor: Executor = Depends(get_executor),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> ExecuteResponse:
     """Run user-supplied Python code via the configured executor; return captured output."""
     backend = settings.executor_backend
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
     start = time.perf_counter()
     try:
         result = await executor.run(req.code, settings)
-    except Exception:
+    except Exception as e:
+        duration = time.perf_counter() - start
         EXECUTIONS.labels(backend=backend, outcome="error").inc()
-        EXECUTION_DURATION.labels(backend=backend).observe(time.perf_counter() - start)
+        EXECUTION_DURATION.labels(backend=backend).observe(duration)
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/execute",
+                method="POST",
+                status=500,
+                code_length=len(req.code),
+                error_kind=type(e).__name__,
+                duration_ms=int(duration * 1000),
+            )
+        )
         raise
 
     duration = time.perf_counter() - start
@@ -51,6 +66,19 @@ async def execute(
         outcome = "error"
     EXECUTIONS.labels(backend=backend, outcome=outcome).inc()
     EXECUTION_DURATION.labels(backend=backend).observe(duration)
+
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/execute",
+            method="POST",
+            status=200,
+            code_length=len(req.code),
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            duration_ms=int(duration * 1000),
+        )
+    )
 
     logger.info(
         "execute_completed",

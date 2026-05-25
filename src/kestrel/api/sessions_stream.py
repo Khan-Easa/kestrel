@@ -38,6 +38,7 @@ from kestrel.execution.session_runtime import (
     SessionTimeout,
 )
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION, STREAM_ACTIVE
+from kestrel.audit import AuditEvent, AuditSink
 
 
 logger = structlog.get_logger()
@@ -54,6 +55,11 @@ def get_session_registry(websocket: WebSocket) -> SessionRegistry:
     each is fed by FastAPI in its respective handler context.
     """
     return websocket.app.state.registry
+
+
+def get_audit_sink(websocket: WebSocket) -> AuditSink:
+    """WebSocket variant of the HTTP audit-sink provider in ``kestrel.audit``."""
+    return websocket.app.state.audit_sink
 
 
 def _extract_token(websocket: WebSocket) -> str | None:
@@ -99,6 +105,7 @@ async def execute_in_session_stream(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
     settings: Settings = Depends(get_settings),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> None:
     """Phase 6 substep 4: streaming execute over WebSocket.
 
@@ -139,6 +146,12 @@ async def execute_in_session_stream(
 
     await websocket.accept()
     STREAM_ACTIVE.inc()
+    audit_status = 500
+    audit_error_kind: str | None = "stream_aborted"
+    audit_exit_code: int | None = None
+    audit_timed_out: bool | None = None
+    audit_code_length: int | None = None
+    audit_start = time.perf_counter()
     try:
         logger.info("session_stream_accepted", session_id_prefix=session_id[:8])
 
@@ -155,6 +168,8 @@ async def execute_in_session_stream(
             payload = json.loads(request_text)
             execute_request = ExecuteRequest(**payload)
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            audit_status = 400
+            audit_error_kind = "bad_request"
             await websocket.send_json(
                 StreamError(
                     code="bad_request",
@@ -164,6 +179,7 @@ async def execute_in_session_stream(
             )
             await _safe_close(websocket, 1011, "bad_request")
             return
+        audit_code_length = len(execute_request.code)
 
         # Shared state for the main loop + heartbeat task.
         # - send_lock serializes WebSocket sends (the main loop and the heartbeat
@@ -246,6 +262,10 @@ async def execute_in_session_stream(
                                 message = message.model_copy(update={"request_id": request_id})
                             if isinstance(message, StreamResult):
                                 final_result = message
+                                audit_exit_code = message.exit_code
+                                audit_timed_out = message.timed_out
+                                audit_status = 200
+                                audit_error_kind = None
 
                             async with send_lock:
                                 send_task = asyncio.create_task(
@@ -259,6 +279,8 @@ async def execute_in_session_stream(
 
                                 if not done:
                                     send_task.cancel()
+                                    audit_status = 500
+                                    audit_error_kind = "backpressure_timeout"
                                     logger.warning(
                                         "session_stream_backpressure_timeout",
                                         session_id_prefix=session_id[:8],
@@ -269,6 +291,8 @@ async def execute_in_session_stream(
 
                                 if disconnect_task in done:
                                     send_task.cancel()
+                                    audit_status = 200
+                                    audit_error_kind = "client_disconnect"
                                     logger.info(
                                         "session_stream_client_disconnect_mid_execute",
                                         session_id_prefix=session_id[:8],
@@ -292,6 +316,8 @@ async def execute_in_session_stream(
                             EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
                         execute_completed = True
                     except WebSocketDisconnect:
+                        audit_status = 200
+                        audit_error_kind = "client_disconnect"
                         logger.info(
                             "session_stream_client_disconnect_mid_execute",
                             session_id_prefix=session_id[:8],
@@ -300,6 +326,10 @@ async def execute_in_session_stream(
                     except SessionTimeout:
                         EXECUTIONS.labels(backend="docker", outcome="timed_out").inc()
                         EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
+                        audit_status = 200
+                        audit_error_kind = None
+                        audit_timed_out = True
+                        audit_exit_code = -1
                         logger.info(
                             "session_stream_timeout",
                             session_id_prefix=session_id[:8],
@@ -309,11 +339,15 @@ async def execute_in_session_stream(
                     except SessionTerminated:
                         EXECUTIONS.labels(backend="docker", outcome="error").inc()
                         EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
+                        audit_status = 410
+                        audit_error_kind = "session_terminated"
                         await _safe_close(websocket, 4410, "session_terminated")
                         return
                     except SessionProtocolError:
                         EXECUTIONS.labels(backend="docker", outcome="error").inc()
                         EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
+                        audit_status = 500
+                        audit_error_kind = "protocol_error"
                         logger.exception(
                             "session_stream_protocol_error",
                             session_id_prefix=session_id[:8],
@@ -331,6 +365,8 @@ async def execute_in_session_stream(
                         if not execute_completed:
                             await runtime.close()
             except SessionBusy:
+                audit_status = 409
+                audit_error_kind = "session_busy"
                 await websocket.send_json(
                     StreamError(
                         code="session_busy",
@@ -341,6 +377,8 @@ async def execute_in_session_stream(
                 await _safe_close(websocket, 4409, "session_busy")
                 return
             except SessionNotFound:
+                audit_status = 410
+                audit_error_kind = "session_gone"
                 await _safe_close(websocket, 4404, "session_not_found")
                 return
         finally:
@@ -357,3 +395,17 @@ async def execute_in_session_stream(
 
     finally:
         STREAM_ACTIVE.dec()
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions/{session_id}/execute/stream",
+                method="WS",
+                status=audit_status,
+                session_id=session_id,
+                code_length=audit_code_length,
+                exit_code=audit_exit_code,
+                timed_out=audit_timed_out,
+                error_kind=audit_error_kind,
+                duration_ms=int((time.perf_counter() - audit_start) * 1000),
+            )
+        )

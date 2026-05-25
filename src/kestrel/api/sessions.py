@@ -14,6 +14,7 @@ from kestrel.api.schemas import (
 from kestrel.execution.session_registry import SessionRegistry
 from kestrel.execution.session_runtime import SessionTimeout
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
+from kestrel.audit import AuditEvent, AuditSink, get_audit_sink, http_status_for_exception
 
 logger = structlog.get_logger()
 
@@ -37,8 +38,34 @@ router = APIRouter(
 )
 async def create_session(
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> SessionResponse:
-    info = await registry.create()
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    start = time.perf_counter()
+    try:
+        info = await registry.create()
+    except Exception as e:
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions",
+                method="POST",
+                status=http_status_for_exception(e),
+                error_kind=type(e).__name__,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+            )
+        )
+        raise
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/sessions",
+            method="POST",
+            status=201,
+            session_id=info.session_id,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+    )
     return SessionResponse.model_validate(info, from_attributes=True)
 
 
@@ -48,12 +75,35 @@ async def create_session(
 )
 async def list_sessions(
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> SessionListResponse:
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    start = time.perf_counter()
+    try:
+        infos = await registry.list()
+    except Exception as e:
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions",
+                method="GET",
+                status=http_status_for_exception(e),
+                error_kind=type(e).__name__,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+            )
+        )
+        raise
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/sessions",
+            method="GET",
+            status=200,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+    )
     return SessionListResponse(
-        sessions=[
-            SessionResponse.model_validate(info, from_attributes=True)
-            for info in await registry.list()
-        ]
+        sessions=[SessionResponse.model_validate(info, from_attributes=True) for info in infos]
     )
 
 
@@ -64,8 +114,35 @@ async def list_sessions(
 async def get_session(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> SessionResponse:
-    info = await registry.get_info(session_id)
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    start = time.perf_counter()
+    try:
+        info = await registry.get_info(session_id)
+    except Exception as e:
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions/{session_id}",
+                method="GET",
+                status=http_status_for_exception(e),
+                session_id=session_id,
+                error_kind=type(e).__name__,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+            )
+        )
+        raise
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/sessions/{session_id}",
+            method="GET",
+            status=200,
+            session_id=session_id,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+    )
     return SessionResponse.model_validate(info, from_attributes=True)
 
 
@@ -76,8 +153,35 @@ async def get_session(
 async def delete_session(
     session_id: str,
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> None:
-    await registry.delete(session_id)
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    start = time.perf_counter()
+    try:
+        await registry.delete(session_id)
+    except Exception as e:
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions/{session_id}",
+                method="DELETE",
+                status=http_status_for_exception(e),
+                session_id=session_id,
+                error_kind=type(e).__name__,
+                duration_ms=int((time.perf_counter() - start) * 1000),
+            )
+        )
+        raise
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/sessions/{session_id}",
+            method="DELETE",
+            status=204,
+            session_id=session_id,
+            duration_ms=int((time.perf_counter() - start) * 1000),
+        )
+    )
 
 
 @router.post(
@@ -88,20 +192,51 @@ async def execute_in_session(
     session_id: str,
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> SessionExecuteResponse:
     backend = "docker"  # session containers are always docker
-    async with registry.acquire_for_execute(session_id) as runtime:
-        start = time.perf_counter()
-        try:
-            result = await runtime.execute(req.code)
-        except SessionTimeout:
-            EXECUTIONS.labels(backend=backend, outcome="timed_out").inc()
-            EXECUTION_DURATION.labels(backend=backend).observe(time.perf_counter() - start)
-            logger.info(
-                "session_execute_timed_out",
-                session_id_prefix=session_id[:8],
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    overall_start = time.perf_counter()
+    try:
+        async with registry.acquire_for_execute(session_id) as runtime:
+            start = time.perf_counter()
+            try:
+                result = await runtime.execute(req.code)
+            except SessionTimeout:
+                EXECUTIONS.labels(backend=backend, outcome="timed_out").inc()
+                EXECUTION_DURATION.labels(backend=backend).observe(time.perf_counter() - start)
+                logger.info(
+                    "session_execute_timed_out",
+                    session_id_prefix=session_id[:8],
+                )
+                await audit.emit(
+                    AuditEvent(
+                        request_id=request_id,
+                        route="/sessions/{session_id}/execute",
+                        method="POST",
+                        status=200,
+                        session_id=session_id,
+                        code_length=len(req.code),
+                        exit_code=-1,
+                        timed_out=True,
+                        duration_ms=int((time.perf_counter() - overall_start) * 1000),
+                    )
+                )
+                return SessionExecuteResponse(timed_out=True, exit_code=-1, outputs=[])
+    except Exception as e:
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions/{session_id}/execute",
+                method="POST",
+                status=http_status_for_exception(e),
+                session_id=session_id,
+                code_length=len(req.code),
+                error_kind=type(e).__name__,
+                duration_ms=int((time.perf_counter() - overall_start) * 1000),
             )
-            return SessionExecuteResponse(timed_out=True, exit_code=-1, outputs=[])
+        )
+        raise
 
     duration = time.perf_counter() - start
     if result.timed_out:
@@ -112,6 +247,20 @@ async def execute_in_session(
         outcome = "error"
     EXECUTIONS.labels(backend=backend, outcome=outcome).inc()
     EXECUTION_DURATION.labels(backend=backend).observe(duration)
+
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/sessions/{session_id}/execute",
+            method="POST",
+            status=200,
+            session_id=session_id,
+            code_length=len(req.code),
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            duration_ms=int((time.perf_counter() - overall_start) * 1000),
+        )
+    )
 
     logger.info(
         "session_execute_completed",

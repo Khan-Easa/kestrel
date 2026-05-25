@@ -53,6 +53,7 @@ from kestrel.execution.session_runtime import (
     SessionTimeout,
 )
 from kestrel.observability import EXECUTIONS, EXECUTION_DURATION
+from kestrel.audit import AuditEvent, AuditSink, get_audit_sink
 
 logger = structlog.get_logger()
 
@@ -69,6 +70,8 @@ async def _run_polling_execute(
     code: str,
     buffer: PollingBuffer,
     request_id: str,
+    audit: AuditSink,
+    execution_id: str,
 ) -> None:
     """Background orchestrator — wraps ``execute_stream`` for the polling path.
 
@@ -84,17 +87,33 @@ async def _run_polling_execute(
     execute actually starts (i.e. acquire_for_execute succeeds). SessionBusy /
     SessionNotFound / RegistryUnavailable failures are not execution events —
     they leave ``outcome=None`` and skip the counter.
+
+    Phase 7 substep 2 slice 3: emits an audit row on completion (one row per
+    execution; see decision 7.3-emit-locus). The audit status reflects the
+    outcome of the EXECUTE, not the HTTP status the polling client sees
+    (which is always 200 — output is delivered via StreamError messages,
+    not HTTP error codes).
     """
     exec_start = time.perf_counter()
     outcome: str | None = None
+    audit_status = 200
+    audit_error_kind: str | None = None
+    audit_exit_code: int | None = None
+    audit_timed_out: bool | None = None
     try:
         async with registry.acquire_for_execute(session_id) as runtime:
             outcome = "error"  # default if execute_stream raises mid-flight
+            audit_status = 500
+            audit_error_kind = "internal"
             async for message in runtime.execute_stream(code):
                 if isinstance(message, (StreamResult, StreamError)):
                     message = message.model_copy(update={"request_id": request_id})
                 await buffer.append(message)
                 if isinstance(message, StreamResult):
+                    audit_exit_code = message.exit_code
+                    audit_timed_out = message.timed_out
+                    audit_status = 200
+                    audit_error_kind = None
                     if message.timed_out:
                         outcome = "timed_out"
                     elif message.exit_code == 0:
@@ -102,31 +121,45 @@ async def _run_polling_execute(
                     else:
                         outcome = "error"
     except SessionBusy:
+        audit_status = 409
+        audit_error_kind = "session_busy"
         await buffer.append(
             StreamError(code="session_busy", detail="another execute is in progress", request_id=request_id)
         )
     except SessionNotFound:
+        audit_status = 404
+        audit_error_kind = "session_not_found"
         await buffer.append(
             StreamError(code="session_not_found", detail="session not found", request_id=request_id)
         )
     except SessionTimeout:
         outcome = "timed_out"
+        audit_status = 200
+        audit_error_kind = None
+        audit_timed_out = True
+        audit_exit_code = -1
         logger.info("polling_execute_timeout", session_id_prefix=session_id[:8])
         await buffer.append(
             StreamError(code="session_timeout", detail="execution exceeded the time limit", request_id=request_id)
         )
     except SessionTerminated:
         outcome = "error"
+        audit_status = 410
+        audit_error_kind = "session_terminated"
         await buffer.append(
             StreamError(code="session_terminated", detail="session is no longer running", request_id=request_id)
         )
     except SessionProtocolError:
         outcome = "error"
+        audit_status = 500
+        audit_error_kind = "protocol_error"
         logger.exception("polling_execute_protocol_error", session_id_prefix=session_id[:8])
         await buffer.append(
             StreamError(code="protocol_error", detail="internal protocol error", request_id=request_id)
         )
     except RegistryUnavailable:
+        audit_status = 503
+        audit_error_kind = "registry_unavailable"
         logger.warning("polling_execute_registry_unavailable", session_id_prefix=session_id[:8])
         await buffer.append(
             StreamError(code="registry_unavailable", detail="session store unavailable", request_id=request_id)
@@ -134,12 +167,29 @@ async def _run_polling_execute(
     except Exception:
         if outcome is None:
             outcome = "error"
+        audit_status = 500
+        audit_error_kind = "internal"
         logger.exception("polling_execute_failed", session_id_prefix=session_id[:8])
         await buffer.append(StreamError(code="internal", detail="internal error", request_id=request_id))
     finally:
         if outcome is not None:
             EXECUTIONS.labels(backend="docker", outcome=outcome).inc()
             EXECUTION_DURATION.labels(backend="docker").observe(time.perf_counter() - exec_start)
+        await audit.emit(
+            AuditEvent(
+                request_id=request_id,
+                route="/sessions/{session_id}/execute/polling",
+                method="POST",
+                status=audit_status,
+                session_id=session_id,
+                execution_id=execution_id,
+                code_length=len(code),
+                exit_code=audit_exit_code,
+                timed_out=audit_timed_out,
+                error_kind=audit_error_kind,
+                duration_ms=int((time.perf_counter() - exec_start) * 1000),
+            )
+        )
         await buffer.mark_done()
 
 
@@ -152,6 +202,7 @@ async def start_polling_execute(
     session_id: str,
     req: ExecuteRequest,
     registry: SessionRegistry = Depends(get_session_registry),
+    audit: AuditSink = Depends(get_audit_sink),
 ) -> PollingExecuteResponse:
     """Start an execute on a background task; return its execution_id at once.
 
@@ -159,6 +210,12 @@ async def start_polling_execute(
     handler). Busy / timeout / terminated outcomes can't be known yet — the
     execute hasn't run — so they surface later as a StreamError in the buffer,
     read via the GET endpoint.
+
+    Phase 7 substep 2 slice 3: this handler does NOT audit. The audit row for
+    a polling execute is emitted by ``_run_polling_execute`` when it
+    completes — one row per execution, regardless of how it ended.
+    POST-time 404s (session not found before spawn) are an audit gap; see
+    decision 7.3-emit-locus.
     """
     await registry.get_info(session_id)  # raises SessionNotFound -> HTTP 404
 
@@ -168,7 +225,9 @@ async def start_polling_execute(
     registry._refresh_metrics()
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
     buffer.task = asyncio.create_task(
-        _run_polling_execute(registry, session_id, req.code, buffer, request_id)
+        _run_polling_execute(
+            registry, session_id, req.code, buffer, request_id, audit, execution_id
+        )
     )
     logger.info(
         "polling_execute_started",

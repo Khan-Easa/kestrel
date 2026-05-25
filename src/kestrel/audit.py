@@ -27,6 +27,7 @@ from typing import Protocol, runtime_checkable
 import structlog
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
+from fastapi import Request
 
 from kestrel.config import Settings
 from kestrel.db.models import AuditEventRow
@@ -214,3 +215,45 @@ def build_audit_sink(
             )
         return PostgresAuditSink(settings, engine)
     return NullAuditSink()
+
+
+def get_audit_sink(request: Request) -> AuditSink:
+    """FastAPI dependency: returns the audit sink bound to ``app.state`` by
+    the lifespan. Routes inject via ``audit: AuditSink = Depends(get_audit_sink)``.
+
+    WebSocket routes need their own provider (the parameter type would be
+    ``WebSocket``, not ``Request``); see ``sessions_stream.py``.
+    """
+    return request.app.state.audit_sink
+
+
+def http_status_for_exception(exc: BaseException) -> int:
+    """Map Kestrel's known exception classes to the HTTP status the app
+    returns for them, for use in audit row ``status`` fields.
+
+    Routes wrap their work in try/except and call this on any caught
+    exception to set the right audit status. Unknown exception classes map
+    to 500 (the conservative default for unhandled errors).
+    """
+    from kestrel.execution.session_registry import (
+        RegistryUnavailable,
+        SessionBusy,
+        SessionNotFound,
+    )
+    from kestrel.execution.session_runtime import (
+        SessionProtocolError,
+        SessionTerminated,
+        SessionTimeout,
+    )
+
+    if isinstance(exc, SessionNotFound):
+        return 404
+    if isinstance(exc, SessionBusy):
+        return 409
+    if isinstance(exc, (SessionTerminated, SessionTimeout)):
+        return 410
+    if isinstance(exc, RegistryUnavailable):
+        return 503
+    if isinstance(exc, SessionProtocolError):
+        return 500
+    return 500
