@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 import structlog
-from fastapi import APIRouter, Depends, Response  # NEW: + Response
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # NEW
+from fastapi import APIRouter, Depends, Response 
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest 
 
 from kestrel.api.auth import require_api_key
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
