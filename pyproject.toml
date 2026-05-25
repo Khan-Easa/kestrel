@@ -14,6 +14,9 @@ dependencies = [
     "structlog>=24.1",
     "redis[hiredis]>=5.0",
     "prometheus-client>=0.20",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "alembic>=1.13",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]

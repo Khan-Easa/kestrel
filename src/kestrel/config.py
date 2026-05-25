@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     stream_backpressure_timeout_seconds: float = Field(default=30.0, gt=0.0, description="Phase 6: per-send back-pressure safety cap. If a single WebSocket send (chunk or heartbeat) can't drain within this window, the streaming runtime kills the kernel and closes the connection with code 1011.")
     polling_buffer_ttl_seconds: float = Field(default=60.0, gt=0.0, description="Phase 6 substep 6: seconds a polling buffer survives after its execute completes. The session sweeper drops buffers older than this, giving late-polling clients a grace window. Decision 6.6-evict.")
     polling_max_wait_seconds: float = Field(default=30.0, gt=0.0, description="Phase 6 substep 6: server-side clamp on the long-poll GET ?wait= parameter. A GET that asks to wait longer is held only this long, bounding how long a worker stays pinned on one held request. Decision 6.6-mech.")
+    audit_backend: Literal["null", "postgres"] = Field(default="null", description="Phase 7 substep 2: audit-log sink. 'null' = no-op (dev, tests). 'postgres' = bounded-queue + PostgresAuditSink. Opt-in via KESTREL_AUDIT_BACKEND.")
+    database_url: str = Field(default="", description="Phase 7 substep 2: SQLAlchemy async URL (e.g.'postgresql+asyncpg://user:pw@localhost:5432/kestrel'). Required when audit_backend='postgres' or any later Phase 7 substep needs Postgres.")
+    audit_queue_max_size: int = Field(default=1000, gt=0, description="Phase 7 substep 2: max in-flight audit events queued for the background drain task. Overflow drops events + bumps kestrel_audit_dropped_total. Decision 7-audit-sync.")
+    audit_shutdown_drain_seconds: float = Field(default=5.0, gt=0.0, description="Phase 7 substep 2: lifespan-shutdown grace window for the audit drain task to flush remaining events before the process exits.")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

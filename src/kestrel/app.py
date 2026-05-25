@@ -14,6 +14,7 @@ from kestrel.api.sessions_polling import router as sessions_polling_router
 from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
+from kestrel.audit import build_audit_sink
 from kestrel.execution.session_registry import (
     RegistryUnavailable,
     SessionBusy,
@@ -39,9 +40,15 @@ def create_app() -> FastAPI:
         registry = build_session_registry(settings)
         await registry.start()
         app.state.registry = registry
+
+        audit_sink = build_audit_sink(settings)
+        await audit_sink.start()
+        app.state.audit_sink = audit_sink
+
         try:
             yield
         finally:
+            await audit_sink.aclose()
             await registry.aclose()
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)
