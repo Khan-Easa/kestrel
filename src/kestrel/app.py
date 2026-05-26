@@ -55,7 +55,13 @@ def create_app() -> FastAPI:
             api_key_store = build_api_key_store(settings, engine=engine)
             if api_key_store is not None:
                 await api_key_store.start()
-            rate_limiter = build_rate_limiter(settings)
+            # Pool-share with the session registry per decision 7.5-redis-pool-share.
+            # InMemorySessionRegistry has no `client` attribute — getattr returns None,
+            # and build_rate_limiter ignores it on the memory branch.
+            registry_redis_client = getattr(registry, "client", None)
+            rate_limiter = build_rate_limiter(
+                settings, redis_client=registry_redis_client
+            )
             await rate_limiter.start()
         except Exception:
             if engine is not None:

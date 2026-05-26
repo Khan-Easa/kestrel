@@ -46,12 +46,13 @@ def test_build_rate_limiter_defaults_to_memory():
     assert isinstance(limiter, InMemoryRateLimiter)
 
 
-def test_build_rate_limiter_returns_memory_when_session_backend_redis_slice1():
-    # Slice-1 placeholder: Redis backend ships in slice 2; until then
-    # multi-worker setups get per-worker memory limiters (no shared state).
+def test_build_rate_limiter_requires_redis_client_when_session_backend_redis():
+    # Slice 2: Redis backend is now real, and the factory rejects requests
+    # that ask for it without providing a client (decision 7.5-redis-pool-share —
+    # the lifespan extracts the client from the session registry).
     settings = _settings(session_backend="redis")
-    limiter = build_rate_limiter(settings)
-    assert isinstance(limiter, InMemoryRateLimiter)
+    with pytest.raises(ValueError, match="requires redis_client"):
+        build_rate_limiter(settings)
 
 
 async def test_initial_bucket_is_full_for_each_route_class():
@@ -157,3 +158,141 @@ async def test_lifecycle_methods_are_no_ops_for_memory_backend():
     # Should still work after aclose — memory backend has no resources to release
     decision = await limiter.check("alice", "execute")
     assert decision.allowed is True
+
+
+# ──────────────────── RedisRateLimiter (Phase 7 substep 5 slice 2) ────────────────────
+
+
+import redis.asyncio  # noqa: E402
+
+from kestrel.rate_limit import RedisRateLimiter  # noqa: E402
+
+TEST_REDIS_URL = "redis://localhost:6379/15"
+
+
+def _redis_reachable() -> bool:
+    """Inline reachability check — mirrors conftest._redis_reachable but
+    test_rate_limit.py intentionally avoids the conftest fixtures (which
+    pull in docker/postgres machinery) so it stays runnable in isolation."""
+    try:
+        import redis as redis_sync
+
+        client = redis_sync.Redis.from_url(TEST_REDIS_URL, socket_connect_timeout=2)
+        client.ping()
+        client.close()
+        return True
+    except Exception:
+        return False
+
+
+@pytest.fixture
+async def redis_limiter_factory():
+    """Yields ``_make(**overrides) -> (limiter, clock)`` for tests that
+    want a started RedisRateLimiter bound to the test Redis db.
+    Flushes the test db on entry + teardown; closes every limiter built."""
+    if not _redis_reachable():
+        pytest.skip("redis unreachable")
+
+    client = redis.asyncio.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
+    await client.flushdb()
+    limiters: list[RedisRateLimiter] = []
+
+    async def _make(**overrides):
+        clock = _Clock()
+        limiter = RedisRateLimiter(
+            _settings(**overrides), client, time_source=clock.now
+        )
+        await limiter.start()
+        limiters.append(limiter)
+        return limiter, clock
+
+    yield _make
+
+    for limiter in limiters:
+        await limiter.aclose()
+    await client.flushdb()
+    await client.aclose()
+
+
+async def test_redis_initial_bucket_is_full(redis_limiter_factory):
+    limiter, _ = await redis_limiter_factory()
+    decision = await limiter.check("alice", "execute")
+    assert decision.allowed is True
+    assert decision.retry_after_seconds == 0
+
+
+async def test_redis_burst_consumes_capacity(redis_limiter_factory):
+    limiter, _ = await redis_limiter_factory()
+    for _ in range(60):
+        decision = await limiter.check("alice", "execute")
+        assert decision.allowed is True
+
+
+async def test_redis_rejected_beyond_capacity(redis_limiter_factory):
+    limiter, _ = await redis_limiter_factory()
+    for _ in range(60):
+        await limiter.check("alice", "execute")
+    decision = await limiter.check("alice", "execute")
+    assert decision.allowed is False
+    assert decision.retry_after_seconds >= 1
+
+
+async def test_redis_refill_over_time(redis_limiter_factory):
+    limiter, clock = await redis_limiter_factory()
+    for _ in range(60):
+        await limiter.check("alice", "execute")
+    clock.advance(30.0)
+    for i in range(30):
+        decision = await limiter.check("alice", "execute")
+        assert decision.allowed is True, f"request {i+1} of 30 should pass"
+    decision = await limiter.check("alice", "execute")
+    assert decision.allowed is False
+
+
+async def test_redis_independent_buckets_per_identity(redis_limiter_factory):
+    limiter, _ = await redis_limiter_factory()
+    for _ in range(60):
+        await limiter.check("alice", "execute")
+    decision = await limiter.check("bob", "execute")
+    decision = await limiter.check("bob", "execute")
+    assert decision.allowed is True
+
+
+async def test_redis_keys_have_ttl(redis_limiter_factory):
+    limiter, _ = await redis_limiter_factory()
+    await limiter.check("alice", "execute")
+    # Reach into the limiter's client to verify the EXPIRE was set
+    ttl = await limiter._client.ttl("kestrel:rate_limit:alice:execute")
+    assert 0 < ttl <= 120
+
+
+async def test_redis_buckets_shared_across_workers():
+    """Two RedisRateLimiter instances pointed at the same Redis db simulate
+    two workers. Tokens consumed by worker A reduce the budget worker B
+    sees. This is the core property the Redis backend exists for."""
+    if not _redis_reachable():
+        pytest.skip("redis unreachable")
+
+    client = redis.asyncio.Redis.from_url(TEST_REDIS_URL, decode_responses=True)
+    await client.flushdb()
+    clock = _Clock()
+    settings = _settings()
+    worker_a = RedisRateLimiter(settings, client, time_source=clock.now)
+    worker_b = RedisRateLimiter(settings, client, time_source=clock.now)
+    await worker_a.start()
+    await worker_b.start()
+    try:
+        for _ in range(30):
+            d = await worker_a.check("alice", "execute")
+            assert d.allowed
+        for _ in range(30):
+            d = await worker_b.check("alice", "execute")
+            assert d.allowed
+        # Both workers combined have used the full 60-token capacity
+        d = await worker_a.check("alice", "execute")
+        assert not d.allowed
+    finally:
+        await worker_a.aclose()
+        await worker_b.aclose()
+        await client.flushdb()
+        await client.aclose()

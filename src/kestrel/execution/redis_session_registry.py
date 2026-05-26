@@ -123,6 +123,17 @@ class RedisSessionRegistry:
             sum(len(by_execution) for by_execution in self._polling_buffers.values())
         )
 
+    @property
+    def client(self) -> Redis | None:
+        """The async Redis client this registry uses, or ``None`` before
+        ``start()`` / after ``aclose()``.
+
+        Exposed so components that share the same Redis pool can consume
+        it without opening a second connection to the same URL — Phase 7
+        substep 5's ``RedisRateLimiter`` pulls this via the lifespan
+        (decision ``7.5-redis-pool-share``).
+        """
+        return self._client
     # ──────────────────── public API ────────────────────
 
     @_redis_errors_to_unavailable
