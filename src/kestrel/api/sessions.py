@@ -4,7 +4,11 @@ import time
 import structlog
 from fastapi import APIRouter, Depends, Request, status
 
-from kestrel.api.auth import require_api_key
+from kestrel.api.auth import (
+    require_api_key,
+    require_rate_limit_execute,
+    require_rate_limit_session_lifecycle,
+)
 from kestrel.api.schemas import (
     ExecuteRequest,
     SessionExecuteResponse,
@@ -36,6 +40,7 @@ router = APIRouter(
     "",
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_rate_limit_session_lifecycle)],
 )
 async def create_session(
     registry: SessionRegistry = Depends(get_session_registry),
@@ -77,6 +82,7 @@ async def create_session(
 @router.get(
     "",
     response_model=SessionListResponse,
+    dependencies=[Depends(require_rate_limit_session_lifecycle)],
 )
 async def list_sessions(
     registry: SessionRegistry = Depends(get_session_registry),
@@ -119,6 +125,7 @@ async def list_sessions(
 @router.get(
     "/{session_id}",
     response_model=SessionResponse,
+    dependencies=[Depends(require_rate_limit_session_lifecycle)],
 )
 async def get_session(
     session_id: str,
@@ -162,6 +169,7 @@ async def get_session(
 @router.delete(
     "/{session_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_rate_limit_session_lifecycle)],
 )
 async def delete_session(
     session_id: str,
@@ -204,6 +212,7 @@ async def delete_session(
 @router.post(
     "/{session_id}/execute",
     response_model=SessionExecuteResponse,
+    dependencies=[Depends(require_rate_limit_execute)],
 )
 async def execute_in_session(
     session_id: str,

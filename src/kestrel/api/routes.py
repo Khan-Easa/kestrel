@@ -5,7 +5,7 @@ import structlog
 from fastapi import APIRouter, Depends, Response 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest 
 
-from kestrel.api.auth import require_api_key
+from kestrel.api.auth import require_api_key, require_rate_limit_execute
 from kestrel.api.schemas import ExecuteRequest, ExecuteResponse
 from kestrel.config import Settings, get_settings
 from kestrel.execution import Executor, get_executor
@@ -27,7 +27,7 @@ async def health() -> dict[str, str]:
 @router.post(
     "/execute",
     response_model=ExecuteResponse,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_key), Depends(require_rate_limit_execute)],
 )
 async def execute(
     req: ExecuteRequest,

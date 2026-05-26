@@ -30,7 +30,11 @@ import uuid
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from kestrel.api.auth import require_api_key
+from kestrel.api.auth import (
+    require_api_key,
+    require_rate_limit_execute,
+    require_rate_limit_session_lifecycle,
+)
 from kestrel.api.schemas import (
     ExecuteRequest,
     PollingExecuteResponse,
@@ -200,6 +204,7 @@ async def _run_polling_execute(
     "/{session_id}/execute/polling",
     response_model=PollingExecuteResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_rate_limit_execute)],
 )
 async def start_polling_execute(
     session_id: str,
@@ -246,6 +251,7 @@ async def start_polling_execute(
 @router.get(
     "/{session_id}/executions/{execution_id}",
     response_model=PollingReadResponse,
+    dependencies=[Depends(require_rate_limit_session_lifecycle)],
 )
 async def read_polling_execute(
     session_id: str,

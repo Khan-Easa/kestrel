@@ -72,3 +72,9 @@ RATE_LIMITED = Counter(
     "Requests rejected by the rate limiter, by route class (7.5-metric).",
     ["route_class"],
 )
+
+RATE_LIMIT_FAILURES = Counter(
+    "kestrel_rate_limit_failures_total",
+    "Rate-limit checks that failed open due to backend unavailability (7.5-fail-policy).",
+    ["route_class"],
+)

@@ -38,8 +38,15 @@ from kestrel.execution.session_runtime import (
     SessionTerminated,
     SessionTimeout,
 )
-from kestrel.observability import EXECUTIONS, EXECUTION_DURATION, STREAM_ACTIVE
+from kestrel.observability import (
+    EXECUTIONS,
+    EXECUTION_DURATION,
+    RATE_LIMITED,
+    RATE_LIMIT_FAILURES,
+    STREAM_ACTIVE,
+)
 from kestrel.audit import AuditEvent, AuditSink
+from kestrel.rate_limit import RateLimiter, RateLimiterUnavailable
 
 
 logger = structlog.get_logger()
@@ -66,6 +73,13 @@ def get_audit_sink(websocket: WebSocket) -> AuditSink:
 def get_api_key_store(websocket: WebSocket) -> ApiKeyStore | None:
     """WebSocket variant of the HTTP api-key-store provider in ``kestrel.api_keys``."""
     return websocket.app.state.api_key_store
+
+
+def get_rate_limiter(websocket: WebSocket) -> RateLimiter:
+    """WebSocket variant of the HTTP rate-limiter provider in ``kestrel.rate_limit``.
+    Slice 3: the per-message check inside the WS handler pulls the limiter
+    from here."""
+    return websocket.app.state.rate_limiter
 
 
 def _extract_token(websocket: WebSocket) -> str | None:
@@ -104,6 +118,7 @@ async def execute_in_session_stream(
     settings: Settings = Depends(get_settings),
     audit: AuditSink = Depends(get_audit_sink),
     api_key_store: ApiKeyStore | None = Depends(get_api_key_store),
+    rate_limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> None:
     """Phase 6 substep 4: streaming execute over WebSocket.
 
@@ -181,6 +196,28 @@ async def execute_in_session_stream(
             await _safe_close(websocket, 1011, "bad_request")
             return
         audit_code_length = len(execute_request.code)
+
+        # Slice 3: per-execute rate-limit check (decisions 7.5-ws-per-execute +
+        # 7.5-ws-check-locus). identity None → skip (7.5-unauth-skip). On denial:
+        # bump RATE_LIMITED, close 4429, audit_status=429. Fail-open on
+        # RateLimiterUnavailable per 7.5-fail-policy.
+        if audit_api_key_id is not None:
+            try:
+                rate_decision = await rate_limiter.check(audit_api_key_id, "execute")
+            except RateLimiterUnavailable as exc:
+                logger.warning(
+                    "rate_limit_check_failed_ws",
+                    route_class="execute",
+                    error=str(exc),
+                )
+                RATE_LIMIT_FAILURES.labels(route_class="execute").inc()
+                rate_decision = None
+            if rate_decision is not None and not rate_decision.allowed:
+                RATE_LIMITED.labels(route_class="execute").inc()
+                audit_status = 429
+                audit_error_kind = "rate_limited"
+                await _safe_close(websocket, 4429, "rate_limited")
+                return
 
         # Shared state for the main loop + heartbeat task.
         # - send_lock serializes WebSocket sends (the main loop and the heartbeat

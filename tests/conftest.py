@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from kestrel.audit import NullAuditSink, PostgresAuditSink
 from kestrel.api_keys import PostgresApiKeyStore
+from kestrel.rate_limit import InMemoryRateLimiter
 from kestrel.app import create_app
 from kestrel.config import Settings, get_settings
 from kestrel.execution import get_executor
@@ -95,6 +96,7 @@ def client(request: pytest.FixtureRequest) -> TestClient:
         app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     app.state.audit_sink = NullAuditSink()
     app.state.api_key_store = None
+    app.state.rate_limiter = InMemoryRateLimiter(get_settings())
     return TestClient(app)
 @pytest.fixture
 def docker_client() -> TestClient:
@@ -106,6 +108,7 @@ def docker_client() -> TestClient:
     app.dependency_overrides[get_executor] = lambda: DockerExecutor()
     app.state.audit_sink = NullAuditSink()
     app.state.api_key_store = None
+    app.state.rate_limiter = InMemoryRateLimiter(get_settings())
     return TestClient(app)
 
 
