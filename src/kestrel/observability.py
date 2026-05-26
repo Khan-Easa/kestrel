@@ -66,3 +66,9 @@ AUDIT_DROPPED = Counter(
     "kestrel_audit_dropped_total",
     "Audit events dropped due to bounded-queue overflow (7-audit-sync).",
 )
+
+RATE_LIMITED = Counter(
+    "kestrel_rate_limited_total",
+    "Requests rejected by the rate limiter, by route class (7.5-metric).",
+    ["route_class"],
+)

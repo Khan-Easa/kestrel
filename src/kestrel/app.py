@@ -16,6 +16,7 @@ from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
 from kestrel.audit import build_audit_sink
 from kestrel.api_keys import build_api_key_store
+from kestrel.rate_limit import build_rate_limiter
 from kestrel.db.session import build_engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 from kestrel.execution.session_registry import (
@@ -54,6 +55,8 @@ def create_app() -> FastAPI:
             api_key_store = build_api_key_store(settings, engine=engine)
             if api_key_store is not None:
                 await api_key_store.start()
+            rate_limiter = build_rate_limiter(settings)
+            await rate_limiter.start()
         except Exception:
             if engine is not None:
                 await engine.dispose()
@@ -62,6 +65,7 @@ def create_app() -> FastAPI:
 
         app.state.audit_sink = audit_sink
         app.state.api_key_store = api_key_store
+        app.state.rate_limiter = rate_limiter
 
         try:
             yield
@@ -71,6 +75,7 @@ def create_app() -> FastAPI:
             await audit_sink.aclose()
             if engine is not None:
                 await engine.dispose()
+            await rate_limiter.aclose()
             await registry.aclose()
 
     app = FastAPI(title="Kestrel", lifespan=lifespan)
