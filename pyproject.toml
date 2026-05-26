@@ -28,6 +28,9 @@ dev = [
     "mypy>=1.11",
 ]
 
+[project.scripts]
+kestrel-keys = "kestrel.cli.keys:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
