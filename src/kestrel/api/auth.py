@@ -145,3 +145,29 @@ async def require_rate_limit_admin(
     limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> None:
     await _enforce_rate_limit(api_key_info, "admin", limiter)
+
+
+# ── Phase 7 substep 6 slice 1: admin scope gate ──
+
+
+async def require_admin_scope(
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
+) -> None:
+    """FastAPI dependency. Gates `/admin/*` routes on the `admin` scope.
+
+    Per decision ``7-admin-dev-shim``:
+    - ``None`` (auth disabled) → pass.
+    - ``"dev"`` (dev shim matched) → pass.
+    - ``ApiKeyInfo`` with ``"admin"`` in ``scopes`` → pass.
+    - anything else → HTTP 403.
+    """
+    if api_key_info is None:
+        return
+    if isinstance(api_key_info, str):
+        return
+    if "admin" in api_key_info.scopes:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="admin scope required",
+    )

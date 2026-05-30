@@ -11,13 +11,14 @@ from kestrel.api.routes import router
 from kestrel.api.sessions import router as sessions_router
 from kestrel.api.sessions_stream import router as sessions_stream_router
 from kestrel.api.sessions_polling import router as sessions_polling_router
+from kestrel.api.admin import router as admin_router
 from kestrel.config import get_settings
 from kestrel.execution.docker_executor import sweep_orphan_containers
 from kestrel.execution import build_session_registry
 from kestrel.audit import build_audit_sink
 from kestrel.api_keys import build_api_key_store
 from kestrel.rate_limit import build_rate_limiter
-from kestrel.db.session import build_engine
+from kestrel.db.session import build_engine, build_sessionmaker
 from sqlalchemy.ext.asyncio import AsyncEngine
 from kestrel.execution.session_registry import (
     RegistryUnavailable,
@@ -46,8 +47,10 @@ def create_app() -> FastAPI:
         app.state.registry = registry
 
         engine: AsyncEngine | None = None
+        sessionmaker = None
         if settings.audit_backend == "postgres" or settings.api_key_backend == "postgres":
             engine = build_engine(settings)
+            sessionmaker = build_sessionmaker(engine)
 
         try:
             audit_sink = build_audit_sink(settings, engine=engine)
@@ -72,6 +75,7 @@ def create_app() -> FastAPI:
         app.state.audit_sink = audit_sink
         app.state.api_key_store = api_key_store
         app.state.rate_limiter = rate_limiter
+        app.state.sessionmaker = sessionmaker
 
         try:
             yield
@@ -89,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(sessions_stream_router)
     app.include_router(sessions_polling_router)
+    app.include_router(admin_router)
 
     @app.exception_handler(SessionNotFound)
     async def _session_not_found(request: Request, exc: SessionNotFound) -> JSONResponse:

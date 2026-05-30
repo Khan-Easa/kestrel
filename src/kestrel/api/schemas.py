@@ -125,3 +125,42 @@ class PollingReadResponse(BaseModel):
             "read with server logs without inspecting per-message frames."
         ),
     )
+
+
+# ── Phase 7 substep 6 slice 1: admin response shapes ──
+
+
+class ApiKeyResponse(BaseModel):
+    id: str = Field(description="UUID4 of the key. Stable identity; safe to log and pass to DELETE/admin/keys/{id} in slice 2.")
+    label: str = Field(description="Human label set at creation time. Free-form, not unique.")
+    created_at: datetime = Field(description="UTC timestamp of when the key was minted.")
+    revoked_at: datetime | None = Field(default=None, description="UTC timestamp of when the key was revoked, or null if still active.")
+    scopes: list[str] = Field(description="Granted scopes, e.g. ['execute'] or ['execute', 'admin'].")
+
+
+
+
+class ApiKeyListResponse(BaseModel):
+    keys: list[ApiKeyResponse] = Field(default_factory=list, description="All API keys known to the store (active + revoked), newest-first. Empty list when api_key_backend == 'null'.")
+
+
+class AuditEventResponse(BaseModel):
+    id: str = Field(description="UUID4 of the audit row.")
+    ts: datetime = Field(description="UTC timestamp the row was inserted server-side (DB default).")
+    request_id: str = Field(description="X-Request-ID of the originating request.")
+    api_key_id: str | None = Field(default=None, description="Identity that made the request: API-key UUID, the literal 'dev' for the dev shim, or null when auth was disabled.")
+    route: str = Field(description="Route path template, e.g. /sessions/{session_id}/execute.")
+    method: str = Field(description="HTTP method; 'WS' for WebSocket activity per decision 7.3-ws-method-label.")
+    status: int = Field(description="HTTP status code (or WebSocket-mapped equivalent).")
+    session_id: str | None = Field(default=None, description="Session UUID when the request was scoped to one.")
+    execution_id: str | None = Field(default=None, description="Execute ID when the row corresponds to one execute (session execute, polling, WS).")
+    code_length: int | None = Field(default=None, description="Length of the user-supplied code in bytes. Never the code itself.")
+    exit_code: int | None = Field(default=None, description="Exit code of the executed kernel cell, when applicable.")
+    timed_out: bool | None = Field(default=None, description="True if the execute was killed for exceeding the timeout.")
+    duration_ms: int | None = Field(default=None, description="Wall-clock duration in milliseconds.")
+    error_kind: str | None = Field(default=None, description="Short stable error category when the request failed.")
+
+
+class AuditListResponse(BaseModel):
+    events: list[AuditEventResponse] = Field(default_factory=list, description="Phase 7 substep 6: audit rows in ts-desc order, page of up to ``limit``.")
+    next_before_ts: datetime | None = Field(default=None, description="Phase 7 substep 6: cursor for the next page; pass as ?before_ts= on the next call. Null on the last page (when fewer results than limit).")
