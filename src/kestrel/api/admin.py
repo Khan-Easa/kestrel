@@ -11,13 +11,21 @@ and the rate-limit dep (already shipped in substep 5 slice 3) caps the
 endpoint at ``KESTREL_RATE_LIMIT_ADMIN_PER_MINUTE`` (default 60/min).
 """
 
+import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from kestrel.api.auth import require_admin_scope, require_rate_limit_admin
+from kestrel.api.auth import (
+    require_admin_scope,
+    require_api_key,
+    require_rate_limit_admin,
+)
 from kestrel.api.schemas import (
+    ApiKeyCreateRequest,
+    ApiKeyCreateResponse,
     ApiKeyListResponse,
     ApiKeyResponse,
     AuditEventResponse,
@@ -26,9 +34,17 @@ from kestrel.api.schemas import (
     SessionResponse,
 )
 from kestrel.api.sessions import get_session_registry
-from kestrel.api_keys import ApiKeyStore, get_api_key_store
+from kestrel.api_keys import (
+    ApiKeyInfo,
+    ApiKeyStore,
+    audit_id_for,
+    get_api_key_store,
+)
+from kestrel.audit import AuditEvent, AuditSink, get_audit_sink
 from kestrel.db.queries import list_audit_events
 from kestrel.execution.session_registry import SessionRegistry
+
+logger = structlog.get_logger()
 
 router = APIRouter(
     prefix="/admin",
@@ -143,3 +159,92 @@ async def list_audit(
     ]
     next_before_ts = rows[-1].ts if len(rows) == limit else None
     return AuditListResponse(events=events, next_before_ts=next_before_ts)
+
+
+@router.post(
+    "/keys",
+    response_model=ApiKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_key(
+    req: ApiKeyCreateRequest,
+    store: ApiKeyStore | None = Depends(get_api_key_store),
+    audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
+) -> ApiKeyCreateResponse:
+    """Mint a new API key. Returns the plaintext token ONCE — the store keeps
+    only its sha256 hash (decision 7-key-hash), so it is unrecoverable after
+    this response. Audited.
+
+    Returns HTTP 503 when ``api_key_backend == "null"`` — there is no store to
+    write to, mirroring ``GET /admin/audit``'s 503 when no engine is built.
+    """
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="api key backend not configured",
+        )
+    token, info = await store.create(req.label, req.scopes)
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/admin/keys",
+            method="POST",
+            status=status.HTTP_201_CREATED,
+            api_key_id=audit_id_for(api_key_info),
+        )
+    )
+    logger.info("admin_key_created", key_id=str(info.id), scopes=list(info.scopes))
+    return ApiKeyCreateResponse(
+        id=str(info.id),
+        label=info.label,
+        created_at=info.created_at,
+        revoked_at=info.revoked_at,
+        scopes=list(info.scopes),
+        token=token,
+    )
+
+
+@router.delete("/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_key(
+    key_id: uuid.UUID,
+    store: ApiKeyStore | None = Depends(get_api_key_store),
+    audit: AuditSink = Depends(get_audit_sink),
+    api_key_info: ApiKeyInfo | str | None = Depends(require_api_key),
+) -> Response:
+    """Revoke an API key by UUID. Idempotent (decision 7.6-revoke-semantics):
+    re-revoking an already-revoked key is a 204 success; only a genuinely
+    unknown UUID is a 404. A malformed UUID is rejected as 422 by FastAPI's
+    path parsing before this body runs. Audited on the success path.
+
+    Returns HTTP 503 when ``api_key_backend == "null"`` — no store to revoke in.
+    """
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="api key backend not configured",
+        )
+    revoked = await store.revoke(key_id)
+    if not revoked:
+        # revoke() returns False for BOTH an unknown id and an already-revoked
+        # one. Disambiguate by scanning the store: absent → 404; present →
+        # it was already revoked, which is an idempotent 204 success.
+        infos = await store.list()
+        if not any(info.id == key_id for info in infos):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="api key not found",
+            )
+    request_id = structlog.contextvars.get_contextvars().get("request_id", "")
+    await audit.emit(
+        AuditEvent(
+            request_id=request_id,
+            route="/admin/keys/{key_id}",
+            method="DELETE",
+            status=status.HTTP_204_NO_CONTENT,
+            api_key_id=audit_id_for(api_key_info),
+        )
+    )
+    logger.info("admin_key_revoked", key_id=str(key_id), newly_revoked=revoked)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

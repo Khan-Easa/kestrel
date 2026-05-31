@@ -138,6 +138,13 @@ class ApiKeyResponse(BaseModel):
     scopes: list[str] = Field(description="Granted scopes, e.g. ['execute'] or ['execute', 'admin'].")
 
 
+class ApiKeyCreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=200, description="Human label for the new key. Free-form, not unique.")
+    scopes: list[str] | None = Field(default=None, description="Scopes to grant. None → store default (['execute']). Pass ['execute', 'admin'] to mint an admin key.")
+
+
+class ApiKeyCreateResponse(ApiKeyResponse):
+    token: str = Field(description="Plaintext API token (kestrel_<43 chars>). Returned ONCE at creation; the store keeps only its sha256 hash, so it is never recoverable afterward — capture it now.")
 
 
 class ApiKeyListResponse(BaseModel):
