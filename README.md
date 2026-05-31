@@ -2,7 +2,7 @@
 
 Self-hosted Python code execution service. Send code over HTTP, get back captured output.
 
-**Status:** Phase 1 of 7 — single-node service with a subprocess executor. Docker-based isolation lands in Phase 2 (see `ROADMAP.md`).
+**Status:** Phases 1–7 of 8 complete — containerised, sandboxed execution with sessions, streaming, rich outputs, and an observability/management layer (Prometheus metrics, request-ID tracing, Postgres audit log, API-key store + CLI, per-key rate limits, admin endpoints). See `ROADMAP.md`. Note: the Quickstart and Endpoints sections below still describe the Phase 1 surface only — a full README refresh (current endpoints, architecture diagram, API docs) is Phase 8 (Polish & Ship).
 
 ## Requirements
 
@@ -105,7 +105,7 @@ tests/integration/test_execute.py    10 tests covering all behaviors
 
 ## Roadmap
 
-Phase 1 (this) is intentionally minimal: no container isolation, no resource limits, no sessions, no persistence. See `ROADMAP.md` for the full 7-phase plan.
+See `ROADMAP.md` for the full 8-phase plan. Phases 1–7 are complete (Foundation through Observability & Management); Phase 8 (Polish & Ship) will refresh this README with the current endpoint surface, an architecture diagram, and full API docs.
 
 ## License
 
