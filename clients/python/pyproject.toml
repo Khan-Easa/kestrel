@@ -6,10 +6,27 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Kestrel maintainers" }]
+keywords = ["kestrel", "code-execution", "sandbox", "llm", "sdk", "client"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "httpx>=0.27",
     "websockets>=13",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Khan-Easa/kestrel"
+Repository = "https://github.com/Khan-Easa/kestrel"
 
 [project.optional-dependencies]
 dev = [
