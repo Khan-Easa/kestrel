@@ -4,13 +4,21 @@ All notable changes to Kestrel are documented here. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions map to the eight
 implementation phases in [`ROADMAP.md`](ROADMAP.md).
 
-## [Unreleased]
+## [1.0.0] — 2026-06-01 — Core complete
 
-Phase 8 (Polish & Ship) in progress: one-command Docker Compose stack, the
-`kestrel-api` image, the `kestrel-client` Python SDK, LLM-agent integration
-examples, and the documentation suite (README rewrite, architecture, API
-reference, deployment guide, security). To be tagged `v0.8.0` (and `v1.0.0` at
-project completion).
+All eight phases implemented, tested, and documented. Marks Kestrel's core as
+shipped (Brief §10/§11). Same code as `0.8.0`; the `1.0.0` tag denotes project
+completion.
+
+## [0.8.0] — 2026-06-01 — Polish & Ship
+
+- One-command Docker Compose stack (API + Redis + PostgreSQL) and the `kestrel-api`
+  control-plane image (docker-out-of-docker).
+- `kestrel-client` Python SDK — sync + async clients, polling and WebSocket
+  streaming, typed errors.
+- LLM-agent integration examples (OpenAI, Anthropic, LangChain).
+- Documentation suite: README rewrite + architecture diagram, architecture, API
+  reference, deployment, security, contributing — and publish/deploy recipes.
 
 ## [0.7.0] — 2026-05-31 — Observability & Management
 
