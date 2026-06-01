@@ -1,6 +1,6 @@
 # Roadmap
 
-See `Kestrel_Project_Brief.pdf` §6 for authoritative phase definitions.
+The eight phases below are the project's implementation roadmap; per-phase design rationale (with rejected alternatives) is recorded in `DECISIONS.md`, and the architecture in `docs/architecture.md`.
 
 - **Phase 1 — Foundation** ✅ *(complete)*: FastAPI skeleton, subprocess runner, bearer-token stub, structlog, pytest.
 - **Phase 2 — Docker Execution** ✅ *(complete)*: containerised execution (`kestrel-runtime` image, asyncio docker CLI driver, orphan sweep).
