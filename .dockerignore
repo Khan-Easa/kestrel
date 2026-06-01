@@ -22,6 +22,7 @@ htmlcov/
 tests/
 docs/
 *.md
+!README.md
 
 # Secrets — belt-and-suspenders alongside .gitignore
 .env
