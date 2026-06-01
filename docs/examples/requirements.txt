@@ -1,0 +1,13 @@
+# Dependencies for the Kestrel integration examples.
+# The Kestrel client SDK plus one LLM framework per example.
+# (These are NOT dependencies of kestrel-client itself — only of these demos.)
+
+kestrel-client
+
+# openai_function_calling.py + langchain_tool.py
+openai>=1.0
+langchain-core>=0.3
+langchain-openai>=0.2
+
+# anthropic_tool_use.py
+anthropic>=0.40
