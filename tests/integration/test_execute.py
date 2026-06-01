@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 
+from kestrel.config import Settings, get_settings
+
 
 def test_health_endpoint(client: TestClient) -> None:
     response = client.get("/health")
@@ -102,3 +104,23 @@ def test_response_echoes_supplied_request_id(client: TestClient) -> None:
     supplied = "test-request-id-123"
     response = client.get("/health", headers={"X-Request-ID": supplied})
     assert response.headers["x-request-id"] == supplied
+
+
+def test_execute_honors_custom_spool_dir(docker_client: TestClient, tmp_path) -> None:
+    # Phase 8 substep 1 (decision 8-api-image): when KESTREL_EXEC_SPOOL_DIR is set,
+    # the stateless-execute code tempfile is created under that directory and
+    # bind-mounted into the sandbox. The user code reads back its own mounted
+    # source at /sandbox/main.py — proving the spool-dir tempfile was created and
+    # the bind mount resolved. The default (empty) path is covered by every other
+    # execute test above. The docker-out-of-docker host-path-match guarantee is
+    # exercised end-to-end by the Compose smoke in slice 3.
+    docker_client.app.dependency_overrides[get_settings] = lambda: Settings(
+        exec_spool_dir=str(tmp_path)
+    )
+    code = 'print(open("/sandbox/main.py").read(), end="")'
+    response = docker_client.post("/execute", json={"code": code})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stdout"] == code
+    assert body["exit_code"] == 0

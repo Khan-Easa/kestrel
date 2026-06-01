@@ -30,7 +30,12 @@ class DockerExecutor:
         start = time.perf_counter()
         container_name = f"kestrel-exec-{uuid.uuid4().hex}"
 
-        with tempfile.TemporaryDirectory(prefix="kestrel-") as host_dir:
+        # Phase 8 substep 1 (decision 8-api-image): when exec_spool_dir is set,
+        # write the code tempfile under it so a containerized API and the host
+        # daemon see the same --volume source path (docker-out-of-docker). Empty
+        # string → None → system temp, the unchanged host-run / test default.
+        spool_dir = settings.exec_spool_dir or None
+        with tempfile.TemporaryDirectory(prefix="kestrel-", dir=spool_dir) as host_dir:
             host_path = Path(host_dir) / "main.py"
             host_path.write_text(code, encoding="utf-8")
 
