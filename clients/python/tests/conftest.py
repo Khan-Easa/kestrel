@@ -16,3 +16,12 @@ def make_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs) ->
     exercised); only the transport is swapped for a MockTransport.
     """
     return KestrelClient("http://test", transport=httpx.MockTransport(handler), **kwargs)
+
+
+def make_async_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs):
+    """An AsyncKestrelClient wired to an in-memory mock handler."""
+    from kestrel_client import AsyncKestrelClient
+
+    return AsyncKestrelClient(
+        "http://test", transport=httpx.MockTransport(handler), **kwargs
+    )

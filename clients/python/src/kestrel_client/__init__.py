@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kestrel_client._client import KestrelClient
+from kestrel_client._async_client import AsyncKestrelClient
 from kestrel_client._exceptions import (
     AuthenticationError,
     KestrelAPIError,
@@ -32,6 +33,7 @@ __version__ = "0.8.0"
 
 __all__ = [
     "KestrelClient",
+    "AsyncKestrelClient",
     "KestrelError",
     "KestrelAPIError",
     "AuthenticationError",
