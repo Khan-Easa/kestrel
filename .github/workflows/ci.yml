@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Service test suite
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: kestrel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Build the sandbox runtime image
+        # The suite pins three tags; the current Dockerfile is a backward-compatible
+        # superset, so build once and tag it as all three.
+        run: |
+          docker build -t kestrel-runtime:0.5.0 docker/executor/
+          docker tag kestrel-runtime:0.5.0 kestrel-runtime:0.3.0
+          docker tag kestrel-runtime:0.5.0 kestrel-runtime:0.2.0
+
+      - name: Run the test suite
+        run: uv run pytest -v
+
+  sdk:
+    name: Python SDK tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Test the SDK
+        working-directory: clients/python
+        run: |
+          uv sync --extra dev
+          uv run pytest -v
