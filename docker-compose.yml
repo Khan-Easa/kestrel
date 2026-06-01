@@ -1,0 +1,65 @@
+# Kestrel — one-command local stack (Phase 8 substep 1 slice 3).
+#
+# PREREQUISITE — build the sandbox runtime image on the host daemon first. The API
+# drives the HOST daemon (docker-out-of-docker), so the runtime image must exist there:
+#   docker build -t kestrel-runtime:0.5.0 docker/executor/
+#
+# Bring it up:   docker compose up --build
+# Mint a key (auth is ON because the Postgres key store is active):
+#   docker compose exec api kestrel-keys create my-key --scope admin
+# Then call it:  curl -H "Authorization: Bearer <token>" -X POST localhost:8000/execute \
+#                  -H "Content-Type: application/json" -d '{"code":"print(2+2)"}'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: kestrel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: kestrel-api:0.8.0
+    ports:
+      - "8000:8000"
+    environment:
+      KESTREL_DATABASE_URL: postgresql+asyncpg://postgres:kestrel@postgres:5432/postgres
+      KESTREL_REDIS_URL: redis://redis:6379/0
+      KESTREL_AUDIT_BACKEND: postgres
+      KESTREL_API_KEY_BACKEND: postgres
+      KESTREL_SESSION_BACKEND: redis
+      KESTREL_EXEC_SPOOL_DIR: /var/kestrel/spool
+      # Uncomment for a quick local dev token (auth shim). NOT for production:
+      # KESTREL_DEV_API_KEY: dev-local-only-change-me
+    volumes:
+      # docker-out-of-docker: the API drives the HOST daemon to launch sandboxes.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared spool dir at an IDENTICAL host:container path, so the sandbox
+      # --volume mount resolves on the host daemon (decision 8-api-image).
+      # Must match KESTREL_EXEC_SPOOL_DIR above.
+      - /var/kestrel/spool:/var/kestrel/spool
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
