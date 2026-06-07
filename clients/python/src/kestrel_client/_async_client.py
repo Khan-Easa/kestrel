@@ -75,8 +75,11 @@ class AsyncKestrelClient:
 
     # ── stateless execute ──
 
-    async def execute(self, code: str) -> ExecuteResult:
-        response = await self._request("POST", "/execute", json={"code": code})
+    async def execute(self, code: str, *, timeout_seconds: Optional[float] = None) -> ExecuteResult:
+        body: dict = {"code": code}
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
+        response = await self._request("POST", "/execute", json=body)
         return ExecuteResult.from_dict(response.json())
 
     # ── sessions ──

@@ -206,3 +206,30 @@ def test_sync_stream_yields_messages_via_polling() -> None:
     assert messages[0].data == "hello"
     assert isinstance(messages[-1], ResultMessage)
     assert messages[-1].result.stdout == "4\n"
+
+
+def test_execute_includes_timeout_seconds_when_set() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.read().decode()
+        return httpx.Response(200, json=_EXECUTE_BODY)
+
+    with make_client(handler) as client:
+        client.execute("print(1)", timeout_seconds=2.5)
+
+    assert '"timeout_seconds"' in seen["body"]
+    assert "2.5" in seen["body"]
+
+
+def test_execute_omits_timeout_seconds_when_unset() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.read().decode()
+        return httpx.Response(200, json=_EXECUTE_BODY)
+
+    with make_client(handler) as client:
+        client.execute("print(1)")
+
+    assert "timeout_seconds" not in seen["body"]

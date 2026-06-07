@@ -68,8 +68,11 @@ class KestrelClient:
 
     # ── stateless execute ──
 
-    def execute(self, code: str) -> ExecuteResult:
-        response = self._request("POST", "/execute", json={"code": code})
+    def execute(self, code: str, *, timeout_seconds: Optional[float] = None) -> ExecuteResult:
+        body: dict = {"code": code}
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = timeout_seconds
+        response = self._request("POST", "/execute", json=body)
         return ExecuteResult.from_dict(response.json())
 
     # ── sessions ──
