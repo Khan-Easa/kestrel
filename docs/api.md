@@ -51,10 +51,13 @@ Run code once in a fresh, throwaway sandbox. Auth: bearer. Rate class: `execute`
 **Request**
 
 ```json
-{ "code": "print(2 + 2)" }
+{ "code": "print(2 + 2)", "timeout_seconds": 30 }
 ```
 
-`code` is required, 1–100,000 characters.
+`code` is required, 1–100,000 characters. `timeout_seconds` is optional (a positive
+number): a per-request wall-clock budget for this call, clamped *down* to the
+server's `KESTREL_EXECUTE_TIMEOUT_SECONDS` ceiling — a request may ask for a shorter
+budget but never exceed the configured maximum. Omitted, the server default applies.
 
 **Response** `200`
 

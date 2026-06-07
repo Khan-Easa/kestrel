@@ -4,6 +4,18 @@ All notable changes to Kestrel are documented here. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions map to the eight
 implementation phases in [`ROADMAP.md`](ROADMAP.md).
 
+## [1.1.0] — 2026-06-07 — Per-request execute timeout
+
+Post-v1.0 additive enhancement (not a phase). Backward-compatible — omitting the
+new field reproduces the prior behavior exactly.
+
+- `POST /execute` accepts an optional `timeout_seconds` field: a per-request
+  wall-clock budget, clamped down to the `KESTREL_EXECUTE_TIMEOUT_SECONDS` server
+  ceiling. A request may ask for a shorter budget but never exceed the configured
+  maximum.
+- `kestrel-client` SDK: `execute(code, *, timeout_seconds=...)` on both the sync
+  and async clients.
+
 ## [1.0.0] — 2026-06-01 — Core complete
 
 All eight phases implemented, tested, and documented. Marks Kestrel's core as

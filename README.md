@@ -142,7 +142,7 @@ All settings are environment variables prefixed `KESTREL_`; defaults live in
 |---|---|---|
 | `KESTREL_DEV_API_KEY` | `""` | Dev bearer token; empty disables the dev shim. |
 | `KESTREL_EXECUTOR_BACKEND` | `docker` | `docker` or `subprocess`. |
-| `KESTREL_EXECUTE_TIMEOUT_SECONDS` | `5.0` | Per-execute wall-clock kill. |
+| `KESTREL_EXECUTE_TIMEOUT_SECONDS` | `5.0` | Per-execute wall-clock kill; also the hard ceiling for an optional per-request `timeout_seconds` on `POST /execute`. |
 | `KESTREL_SESSION_BACKEND` | `memory` | `memory` or `redis`. |
 | `KESTREL_AUDIT_BACKEND` | `null` | `null` or `postgres`. |
 | `KESTREL_API_KEY_BACKEND` | `null` | `null` or `postgres`. |
