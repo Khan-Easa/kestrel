@@ -12,6 +12,8 @@ class Executor(Protocol):
 
     Implementations must expose an async ``run`` method that takes user code
     plus the current Settings and returns a fully populated ExecuteResponse.
+    ``timeout_seconds`` overrides the wall-clock kill budget for this one call;
+    None falls back to ``settings.execute_timeout_seconds``.
     """
 
-    async def run(self, code: str, settings: Settings) -> ExecuteResponse: ...
+    async def run(self, code: str, settings: Settings, timeout_seconds: float | None = None) -> ExecuteResponse: ...

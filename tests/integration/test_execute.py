@@ -124,3 +124,46 @@ def test_execute_honors_custom_spool_dir(docker_client: TestClient, tmp_path) ->
     body = response.json()
     assert body["stdout"] == code
     assert body["exit_code"] == 0
+
+
+def test_execute_honors_per_request_timeout(client: TestClient, override_settings) -> None:
+    # A per-request timeout below the server ceiling tightens the budget.
+    override_settings(execute_timeout_seconds=10.0)
+
+    response = client.post(
+        "/execute",
+        json={"code": "while True: pass", "timeout_seconds": 1.0},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is True
+    assert body["exit_code"] == -1
+    assert body["duration_ms"] >= 1000
+    assert body["duration_ms"] < 9000  # killed at the 1s request budget, not the 10s ceiling
+
+
+def test_execute_timeout_clamped_to_server_ceiling(client: TestClient, override_settings) -> None:
+    # A per-request value above the ceiling is clamped down — a caller can never
+    # exceed the operator-configured maximum.
+    override_settings(execute_timeout_seconds=1.0)
+
+    response = client.post(
+        "/execute",
+        json={"code": "while True: pass", "timeout_seconds": 30.0},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timed_out"] is True
+    assert body["exit_code"] == -1
+    assert body["duration_ms"] >= 1000
+    assert body["duration_ms"] < 10000  # killed near the 1s ceiling, not 30s
+
+
+def test_execute_rejects_nonpositive_timeout(client: TestClient) -> None:
+    response = client.post("/execute", json={"code": "print(1)", "timeout_seconds": 0})
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any("timeout_seconds" in error["loc"] for error in detail)

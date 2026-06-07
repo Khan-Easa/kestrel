@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class ExecuteRequest(BaseModel):
     code: str= Field(min_length = 1, max_length = 100_000, description= "Python source to execute.")
+    timeout_seconds: float | None = Field(default=None, gt=0, description="Optional per-request wall-clock timeout, in seconds. Omitted (null) uses the server default KESTREL_EXECUTE_TIMEOUT_SECONDS. A supplied value is clamped DOWN to that setting, which is the hard ceiling — a request may ask for a shorter budget but never exceed the operator-configured maximum.")
 
 class ExecuteResponse(BaseModel):
     stdout: str = Field(default="", description= "Captured standard output (UTF-8, possibly truncated).")

@@ -40,9 +40,14 @@ async def execute(
     backend = settings.executor_backend
     request_id = structlog.contextvars.get_contextvars().get("request_id", "")
     audit_api_key_id = audit_id_for(api_key_info)
+    effective_timeout = (
+        settings.execute_timeout_seconds
+        if req.timeout_seconds is None
+        else min(req.timeout_seconds, settings.execute_timeout_seconds)
+    )
     start = time.perf_counter()
     try:
-        result = await executor.run(req.code, settings)
+        result = await executor.run(req.code, settings, timeout_seconds=effective_timeout)
     except Exception as e:
         duration = time.perf_counter() - start
         EXECUTIONS.labels(backend=backend, outcome="error").inc()

@@ -32,8 +32,9 @@ class SubprocessExecutor:
     won't need to change.
     """
 
-    async def run(self, code: str, settings: Settings) -> ExecuteResponse:
+    async def run(self, code: str, settings: Settings, timeout_seconds: float | None = None) -> ExecuteResponse:
         start = time.perf_counter()
+        timeout = settings.execute_timeout_seconds if timeout_seconds is None else timeout_seconds
 
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-I", "-c", code,
@@ -49,7 +50,7 @@ class SubprocessExecutor:
         timed_out = False
         try:
             (stdout_bytes, stdout_truncated), (stderr_bytes, stderr_truncated) = (
-                await asyncio.wait_for(read_both, timeout=settings.execute_timeout_seconds)
+                await asyncio.wait_for(read_both, timeout=timeout)
             )
             exit_code = await proc.wait()
         except asyncio.TimeoutError:

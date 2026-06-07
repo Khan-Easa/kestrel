@@ -26,9 +26,10 @@ class DockerExecutor:
     def __init__(self, image_tag: str = "kestrel-runtime:0.2.0") -> None:
         self._image_tag = image_tag
 
-    async def run(self, code: str, settings: Settings) -> ExecuteResponse:
+    async def run(self, code: str, settings: Settings, timeout_seconds: float | None = None) -> ExecuteResponse:
         start = time.perf_counter()
         container_name = f"kestrel-exec-{uuid.uuid4().hex}"
+        timeout = settings.execute_timeout_seconds if timeout_seconds is None else timeout_seconds
 
         # Phase 8 substep 1 (decision 8-api-image): when exec_spool_dir is set,
         # write the code tempfile under it so a containerized API and the host
@@ -73,7 +74,7 @@ class DockerExecutor:
             timed_out = False
             try:
                 (stdout_bytes, stdout_truncated), (stderr_bytes, stderr_truncated) = (
-                    await asyncio.wait_for(read_both, timeout=settings.execute_timeout_seconds)
+                    await asyncio.wait_for(read_both, timeout=timeout)
                 )
                 exit_code = await proc.wait()
             except asyncio.TimeoutError:

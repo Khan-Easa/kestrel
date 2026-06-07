@@ -678,6 +678,20 @@ The committed SDK tests use `httpx.MockTransport` (and its ASGI/WebSocket equiva
 
 ---
 
+## Post-v1.0 Enhancements
+
+Additive capabilities layered on after the v1.0.0 ship (all eight phases complete). Each keeps Kestrel general-purpose — no consumer-specific assumptions — and is backward-compatible by construction.
+
+### exec-per-request-timeout — `POST /execute` accepts an optional `timeout_seconds`, clamped down to the server ceiling
+
+Kestrel's wall-clock kill budget was process-global: `execute_timeout_seconds` (default 5s), fixed at server start, applied to every `/execute` call. That is too rigid for a general-purpose sandbox serving heterogeneous workloads — a caller running a quick snippet wants a tight fail-fast budget, while a caller running a heavier job wants longer, and one global value forces the operator to pick a single compromise or run a dedicated instance per workload class. Resolution: `ExecuteRequest` gains an optional `timeout_seconds`. The semantics are deliberately one-directional — `execute_timeout_seconds` becomes the **default** (applied when the field is omitted) *and* the **hard ceiling**: a supplied value is clamped *down* to it (`min(requested, ceiling)`) at the API boundary in `routes.py`. A request may therefore ask for a *shorter* budget but can never exceed the operator-configured maximum. This mirrors the per-request clamp Kestrel already uses for the polling long-poll `?wait=` parameter (`polling_max_wait_seconds`, decision 6.6-mech) — same shape, same safety property, so it is idiomatic rather than novel surface. Raising the maximum stays an operator decision (the env var), which is what keeps this a safe multi-tenant control rather than a way for any caller to pin a sandbox container open.
+
+The change is additive at every layer: omitting the field (every pre-existing caller, the entire prior test suite) reproduces the previous behaviour byte-for-byte; the `Executor.run` Protocol and both backends (`SubprocessExecutor`, `DockerExecutor`) gain a `timeout_seconds: float | None = None` parameter that falls back to `settings.execute_timeout_seconds`, so any direct executor caller is unaffected; `ExecuteResponse` is unchanged (`duration_ms` + `timed_out` already reveal what happened). The clamp lives in the route (policy boundary) while the executors merely consume the resolved value (mechanism). The `kestrel-client` SDK exposes the field as a keyword-only `execute(code, *, timeout_seconds=None)` on both the sync and async clients, omitting it from the JSON body when `None` so the emitted request is identical to before.
+
+Rejected alternatives: a second `execute_max_timeout_seconds` setting so per-request values could exceed the default up to a separate maximum (two-knob model) — more expressive but adds config surface for a capability the single-knob clamp already covers, since an operator who wants longer runs simply raises the one ceiling; allowing per-request values to *exceed* the ceiling (unbounded, or with only a soft cap) — breaks the resource guarantee that makes the sandbox safe to expose publicly; bundling a per-request output-cap override into the same change — deferred as unneeded for now, the identical clamp pattern can add it later if a real need appears.
+
+---
+
 ## Maintaining this log
 
 New significant design decisions are added here as they are made, each with the
